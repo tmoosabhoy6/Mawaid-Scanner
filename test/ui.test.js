@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
-import { fixture,tour,issue } from './helpers.js';
+import { fixture,tour,issue,scan } from './helpers.js';
 const html=readFileSync('public/index.html','utf8'),js=readFileSync('public/app.js','utf8');
 async function waitFor(fn){for(let n=0;n<200;n++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw new Error('UI condition timed out');}
 function domFor(f,path='/'){
@@ -76,5 +76,66 @@ test('scanner: unused QR green, duplicate red, no yellow state and closed servic
  dom.window.close();f.setTime('2026-10-21T06:00:00Z');dom=domFor(f,'/scanner');
  await waitFor(()=>dom.window.document.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
  assert.equal(dom.window.document.querySelector('#startCamera').disabled,true);assert.equal(dom.window.document.querySelector('#manualSubmit').disabled,true);
+ }finally{dom?.window.close();f.close();}
+});
+
+function fakeFolder(name){
+ const dirs=new Map(),files=new Map();
+ return {name,kind:'directory',dirs,files,
+  async getDirectoryHandle(n,{create}={}){if(!dirs.has(n)){if(!create)throw Object.assign(new Error('Not found'),{name:'NotFoundError'});dirs.set(n,fakeFolder(n));}return dirs.get(n);},
+  async getFileHandle(n){return{async createWritable(){let data='';return{async write(d){data+=d;},async close(){files.set(n,data);}};}};},
+  async queryPermission(){return 'granted';},async requestPermission(){return 'granted';}};
+}
+async function archiveFixture(){
+ const f=await fixture();const t=await tour(f,2),{cards}=await issue(f,t.id);
+ await scan(f,cards[0].token);await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
+ return f;
+}
+async function startArchive(w,d){
+ await waitFor(()=>d.querySelector('#readyList b'));
+ const input=d.querySelector('#clearForm [name=before]');input.value='2026-10-22';input.dispatchEvent(new w.Event('change'));
+ await waitFor(()=>d.querySelector('#readyList b')?.textContent==='2');
+ submit(w,d.querySelector('#clearForm'),d.querySelector('#archiveClear'));
+ await waitFor(()=>/Archived and cleared/.test(d.querySelector('#archiveProgress').textContent));
+}
+
+test('archive & clear saves CSV folders inside Mawaid Archive, then clears only older records',async()=>{
+ const f=await archiveFixture();let dom;try{
+ dom=domFor(f,'/#settings');const w=dom.window,d=w.document,documents=fakeFolder('Documents');let picks=0;
+ w.showDirectoryPicker=async()=>{picks++;return documents;};
+ await startArchive(w,d);
+ const root=documents.dirs.get('Mawaid Archive');assert.ok(root);assert.equal(root.dirs.size,1);
+ const [name,archive]=[...root.dirs][0];assert.match(name,/^Archive \d{4}-\d{2}-\d{2} \d{2}\.\d{2}$/);
+ assert.deepEqual([...archive.files.keys()].sort(),['cards.csv','daily-meal-summary.csv','meals-served.csv','print-log.csv','read-me.txt','scan-log.csv','tours.csv']);
+ const scans=archive.files.get('scan-log.csv');assert.match(scans,/26\/3205,FH Kuwait,1,Admitted,admitted/);assert.match(scans,/Declined,unknown card/);
+ assert.match(archive.files.get('daily-meal-summary.csv'),/2026-10-21,26\/3205,FH Kuwait,2,1,0,0/);
+ assert.ok(![...archive.files.keys()].some(n=>n.endsWith('.pdf')));
+ assert.match(d.querySelector('#archiveProgress').textContent,/2 scan records, 1 meals served/);
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE date<'2026-10-22'").get().n,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,1);
+ // A second archive in the same minute gets its own folder.
+ await waitFor(()=>!d.querySelector('#archiveClear').disabled);
+ submit(w,d.querySelector('#clearForm'),d.querySelector('#archiveClear'));
+ await waitFor(()=>root.dirs.size===2);assert.ok([...root.dirs.keys()].some(n=>n.endsWith('(2)')));
+ }finally{dom?.window.close();f.close();}
+});
+
+test('archive downloads a zip where folders are unavailable; delete asks before removing records',async()=>{
+ const f=await archiveFixture();let dom;try{
+ dom=domFor(f,'/#settings');const w=dom.window,d=w.document;let blob;
+ w.URL.createObjectURL=b=>{blob=b;return 'blob:test';};w.URL.revokeObjectURL=()=>{};
+ await waitFor(()=>/zip/.test(d.querySelector('#folderLine')?.textContent));
+ await startArchive(w,d);
+ const bytes=Buffer.from(await blob.arrayBuffer()),text=bytes.toString('latin1');
+ assert.equal(text.slice(0,2),'PK');assert.match(text,/Mawaid Archive\/Archive [^/]+\/scan-log\.csv/);assert.match(text,/'=HYPERLINK|unknown card/);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,1);
+ f.setTime('2026-10-23T04:00:00Z');
+ const input=d.querySelector('#clearForm [name=before]');input.value='2026-10-23';input.dispatchEvent(new w.Event('change'));
+ await waitFor(()=>!d.querySelector('#deleteRecords').disabled&&d.querySelector('#readyList b')?.textContent==='1');
+ d.querySelector('#deleteRecords').click();await waitFor(()=>d.querySelector('#confirmDelete'));
+ d.querySelector('#cancelDelete').click();assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,1);
+ d.querySelector('#deleteRecords').click();await waitFor(()=>d.querySelector('#confirmDelete'));d.querySelector('#confirmDelete').click();
+ await waitFor(()=>/^Deleted 1 scan records/.test(d.querySelector('#archiveProgress').textContent));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
  }finally{dom?.window.close();f.close();}
 });

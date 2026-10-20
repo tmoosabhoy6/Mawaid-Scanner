@@ -29,7 +29,7 @@ test('five lost cards preserve the 50-person meal limit and revoke originals',as
  const t=await tour(f,50),{cards}=await issue(f,t.id);
  await Promise.all(cards.slice(0,5).map(c=>scan(f,c.token)));
  const ids=cards.slice(0,5).map(c=>c.person_id);
- await f.admin.post('/api/labels').send({personIds:ids,requestKey:randomUUID()}).expect(201);
+ await f.admin.post('/api/labels').send({personIds:ids,expectedCardIds:Object.fromEntries(cards.slice(0,5).map(c=>[c.person_id,c.id])),requestKey:randomUUID()}).expect(201);
  const replacements=f.rendered.at(-1);assert.equal(replacements.length,5);
  for(const c of cards.slice(0,5))assert.equal((await scan(f,c.token)).body.reason,'replaced_card');
  for(const c of replacements)assert.equal((await scan(f,c.token)).body.reason,'already_used');
@@ -44,7 +44,7 @@ test('unlimited replacement iterations; unused entitlement works on newest code 
  const f=await fixture();try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);let previous=cards[0];
  for(let n=0;n<12;n++){
- await f.admin.post('/api/labels').send({personIds:[previous.person_id],requestKey:randomUUID()}).expect(201);
+ await f.admin.post('/api/labels').send({personIds:[previous.person_id],expectedCardIds:{[previous.person_id]:previous.id},requestKey:randomUUID()}).expect(201);
  assert.equal((await scan(f,previous.token)).body.reason,'replaced_card');previous=f.rendered.at(-1)[0];
  }
  assert.equal((await scan(f,previous.token)).body.status,'green');
@@ -68,9 +68,11 @@ test('two operators cannot issue overlapping initial cards or replacements',asyn
  const f=await fixture();try{
  const t=await tour(f,1);
  const results=await Promise.all(Array.from({length:2},()=>f.admin.post('/api/labels').send({tourIds:[t.id],requestKey:randomUUID()})));
- assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);
- const person=f.db.prepare('SELECT id FROM people').get();
- const replacements=await Promise.all(Array.from({length:2},()=>f.admin.post('/api/labels').send({personIds:[person.id],requestKey:randomUUID()})));
+ // The losing operator sees either a conflict or "already has cards", depending on interleaving.
+ assert.equal(results.filter(r=>r.status===201).length,1);assert.ok(results.some(r=>r.status===409||r.status===400));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,1);
+ const person=f.db.prepare('SELECT p.id,c.id AS card_id FROM people p JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL').get();
+ const replacements=await Promise.all(Array.from({length:2},()=>f.admin.post('/api/labels').send({personIds:[person.id],expectedCardIds:{[person.id]:person.card_id},requestKey:randomUUID()})));
  assert.deepEqual(replacements.map(r=>r.status).sort(),[201,409]);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NULL').get().n,1);
  }finally{f.close();}
@@ -175,5 +177,37 @@ test('3 by 2 inch defaults and compact label validation match supported layouts'
  await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50.8,name:'Zebra'}}).expect(200);
  await f.admin.post('/api/settings').send({printer:{widthMm:69,heightMm:50.8,name:'Zebra'}}).expect(400);
  await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50,name:'Zebra'}}).expect(400);
+ }finally{f.close();}
+});
+
+test('archive export pages records; clearing never touches today, active stays or other roles',async()=>{
+ const f=await fixture();try{
+ const t=await tour(f,2),{batch,cards}=await issue(f,t.id);
+ assert.equal((await scan(f,cards[0].token)).body.status,'green');assert.equal((await scan(f,cards[1].token)).body.status,'green');
+ f.setTime('2026-10-22T04:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ let status=(await f.admin.get('/api/archive?before=2026-10-22').expect(200)).body;
+ assert.deepEqual(status.counts,{scans:2,meals:2,pdfs:0});assert.equal(status.today,'2026-10-22');assert.ok(status.databaseBytes>0);
+ await f.admin.get('/api/archive?before=2026-10-23').expect(400);
+ await f.scanner.get('/api/archive').expect(403);await f.scanner.post('/api/archive/clear').send({before:'2026-10-22'}).expect(403);
+ await f.admin.post('/api/archive/clear').send({}).expect(400);await f.admin.post('/api/archive/clear').send({before:''}).expect(400);await f.admin.get('/api/archive/unknown').expect(404);
+ const first=(await f.admin.get('/api/archive/scans?before=2026-10-22&limit=1').expect(200)).body;
+ assert.equal(first.rows.length,1);assert.equal(first.rows[0].tour_id,'26/3205');assert.equal(first.rows[0].reason,'admitted');assert.ok(first.next);
+ const rest=(await f.admin.get(`/api/archive/scans?before=2026-10-22&limit=1&after=${first.next}`).expect(200)).body;
+ assert.equal(rest.rows.length,1);assert.notEqual(rest.rows[0].cursor,first.rows[0].cursor);
+ const meals=(await f.admin.get('/api/archive/meals?before=2026-10-22').expect(200)).body;assert.equal(meals.rows.length,2);assert.equal(meals.next,null);assert.equal(meals.rows[0].meal,'breakfast');
+ for(const name of ['tours','cards','prints'])assert.ok((await f.admin.get(`/api/archive/${name}?before=2026-10-22`).expect(200)).body.rows.length>=1);
+ const cleared=(await f.admin.post('/api/archive/clear').send({before:'2026-10-22'}).expect(200)).body;
+ assert.deepEqual(cleared.deleted,{scans:2,meals:2,pdfs:0});assert.equal(cleared.done,true);
+ // Today's admission survives, so the same meal is still refused.
+ assert.equal((await scan(f,cards[0].token)).body.reason,'already_used');
+ await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(200);
+ f.setTime('2026-10-25T04:00:00Z');
+ const later=(await f.admin.post('/api/archive/clear').send({before:'2026-10-25'}).expect(200)).body;assert.equal(later.deleted.pdfs,1);
+ const gone=await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(410);assert.match(gone.body.error,/cleared/);
+ const log=(await f.admin.get('/api/batches').expect(200)).body[0];assert.equal(log.printer_status,'pdf_cleared');assert.equal(log.pdf_ready,0);
+ assert.equal((await f.admin.get('/api/tours').expect(200)).body[0].batch_status,'pdf_cleared');
+ await f.admin.post(`/api/batches/${batch.id}/status`).send({status:'printer_error'}).expect(200);
+ assert.equal((await f.admin.get('/api/batches').expect(200)).body[0].printer_status,'pdf_cleared');
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards').get().n,2);
  }finally{f.close();}
 });

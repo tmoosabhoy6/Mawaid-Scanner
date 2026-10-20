@@ -6,7 +6,7 @@ The pinned official `cf` CLI and Vite plugin are beta releases. This project use
 
 ## Connected Git builds
 
-The connected Worker is `mawaid-scanner` and its shared database is `mawayid-karbala`. Cloudflare's Git build settings must use:
+The connected Worker is `mawaid-scanner` and its shared database is `mawayid-karbala` (the database keeps its original name; renaming it would create a different, empty database). Cloudflare's Git build settings must use:
 
 - Branch: `main`
 - Root directory: `/`
@@ -76,8 +76,8 @@ The local Cloudflare runtime test creates 2,000 unique cards and accepts 6,000 m
 
 Current free limits are 100,000 Worker requests/day, 10 ms CPU/invocation, 5 million D1 rows read/day, 100,000 rows written/day and 500 MB per D1 database (5 GB across the account). Index updates count toward writes. Four phones polling service status every 15 seconds all day use about 23,040 requests, plus up to 6,000 accepted scans and administrative work. Duplicate scans and retries also count. Unchanged five-minute syncs skip tour-row writes.
 
-Saved PDFs, encrypted pending jobs, cards, indexes and scan history all consume storage. Settings displays database usage. **No automatic deletion or history archive is implemented**: unlimited retention is not possible within 500 MB. Check Cloudflare's usage dashboard regularly and export a private backup before capacity is reached. Free-plan limits can stop service when exhausted; they do not automatically provide unlimited capacity.
+Saved PDFs, encrypted pending jobs, cards, indexes and scan history all consume storage. Settings displays database usage and offers **Archive & clear** and **Delete without archiving** (see the [main README](../README.md#storage-archive-and-clear)). Nothing is deleted automatically. Clearing removes scan records and meals served dated before a chosen date, never today's, and the PDFs of stays that have departed. It runs in bounded chunks and stops after 40,000 rows written per UTC day, leaving the rest of the 100,000 daily free writes for scanning. Freed pages are reused by new records. Check Cloudflare's usage dashboard regularly.
 
-Use D1's database export in the Cloudflare dashboard before schema changes and for regular off-site backups. Protect exports because they contain recoverable label PDFs. Retention cleanup requires a separately reviewed migration that preserves active stays and their meal history; do not delete admissions while a guest is eligible. A new database must not be substituted for the current one during live service.
+Use D1's database export in the Cloudflare dashboard before schema changes and for regular off-site backups. Protect exports because they contain recoverable label PDFs. The in-app archive is a readable record, not a restorable backup. A new database must not be substituted for the current one during live service.
 
 Quota references: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/), [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).

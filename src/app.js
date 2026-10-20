@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
 import { eligibility, serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
+import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual(Buffer.from(x), Buffer.from(y)); };
 const uid = () => randomUUID();
@@ -68,9 +69,9 @@ export function createApp(options = {}) {
   app.get('/api/session', auth(), (req, res) => res.json({ role: req.role }));
   app.get('/api/service', auth(), (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, meals: MEALS, startDate: START_DATE }));
   app.get('/api/tours', auth('admin'), (req, res) => {
-    const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
+    const rows = db.prepare(`SELECT x.*, (SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
       (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ?) ORDER BY t.arrival,t.tour_id`).all(
+      FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ?) ORDER BY t.arrival,t.tour_id) x`).all(
       req.query.arrival || '', req.query.arrival || '', req.query.q || '', `%${req.query.q || ''}%`, `%${req.query.q || ''}%`);
     res.json(rows);
   });
@@ -101,6 +102,8 @@ export function createApp(options = {}) {
         if (!person) throw fail('Person not found.', 404);
         const oldCard = db.prepare('SELECT id FROM cards WHERE person_id=? AND revoked_at IS NULL').get(id);
         if (!oldCard) throw fail('This person has no active card.',409);
+        // The replacement list records each card it showed; a card replaced since then is not replaced twice.
+        if (req.body.expectedCardIds?.[id] !== oldCard.id) throw fail('This card changed since the replacement list was opened. Refresh it before trying again.', 409);
         if (!person.active) throw fail('This source tour is no longer active.');
         if (person.person_no > person.pax) throw fail('Person exceeds the current tour PAX.');
         cards.push({ ...person, id: uid(), person_id: id, tour_key: person.id, previous_card: oldCard.id, token: token(), printed_at: stamp });
@@ -134,14 +137,16 @@ export function createApp(options = {}) {
     });
     res.status(201).json(result);
   });
-  app.get('/api/batches', auth('admin'), (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,COUNT(c.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
+  app.get('/api/batches', auth('admin'), (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
   app.get('/api/batches/:id/pdf', auth('admin'), (req, res) => {
-    const batch = db.prepare('SELECT pdf FROM batches WHERE id=?').get(req.params.id); if (!batch?.pdf) throw fail('PDF not found.', 404);
-    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="mawayid-${req.params.id}.pdf"` }).send(Buffer.from(batch.pdf));
+    const batch = db.prepare('SELECT pdf,printer_status FROM batches WHERE id=?').get(req.params.id);
+    if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.', 410);
+    if (!batch?.pdf) throw fail('PDF not found.', 404);
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="mawaid-${req.params.id}.pdf"` }).send(Buffer.from(batch.pdf));
   });
   app.post('/api/batches/:id/status', auth('admin'), (req, res) => {
     if (!['sent_to_printer','printer_error'].includes(req.body.status)) throw fail('Invalid printer status.');
-    db.prepare('UPDATE batches SET printer_status=? WHERE id=?').run(req.body.status, req.params.id); res.json({ ok: true });
+    db.prepare('UPDATE batches SET printer_status=? WHERE id=? AND pdf IS NOT NULL').run(req.body.status, req.params.id); res.json({ ok: true });
   });
   app.post('/api/scan', auth(), (req, res) => {
     const { requestKey, code } = req.body;
@@ -178,7 +183,24 @@ export function createApp(options = {}) {
       FROM tours t LEFT JOIN people p ON p.tour_id=t.id LEFT JOIN admissions a ON a.person_id=p.id AND a.date=?
       WHERE t.active=1 AND t.arrival<=? AND t.departure>=? GROUP BY t.id ORDER BY t.tour_id`).all(date,date,date));
   });
-  app.get('/api/settings', auth('admin'), (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, meals: MEALS }));
+  const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
+  app.get('/api/settings', auth('admin'), (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, meals: MEALS, hosting: 'server', databaseBytes: databaseBytes() }));
+  const archive = archiveSql(false), cutoff = value => { const today = serviceAt(now()).date; return archiveCutoff(value || today, today); };
+  app.get('/api/archive', auth('admin'), (req, res) => {
+    const before = cutoff(req.query.before);
+    res.json({ before, today: serviceAt(now()).date, counts: db.prepare(archive.counts).get(before), databaseBytes: databaseBytes(), cleanup: null });
+  });
+  app.get('/api/archive/:dataset', auth('admin'), (req, res) => {
+    const sql = Object.hasOwn(ARCHIVE_DATASETS, req.params.dataset) && ARCHIVE_DATASETS[req.params.dataset]; if (!sql) throw fail('Not found.', 404);
+    const before = cutoff(req.query.before), { after, limit } = archivePage(new URL(req.url, 'http://local'));
+    const rows = db.prepare(sql).all(before, after, limit);
+    res.json({ rows, next: rows.length === limit ? rows.at(-1).cursor : null });
+  });
+  app.post('/api/archive/clear', auth('admin'), (req, res) => {
+    const before = archiveCutoff(req.body.before, serviceAt(now()).date);
+    const deleted = transaction(db, () => ({ scans: db.prepare(archive.clearScans).run(before).changes, meals: db.prepare(archive.clearMeals).run(before).changes, pdfs: db.prepare(archive.clearPdfs).run(before).changes }));
+    res.json({ deleted, done: deleted.scans < CLEAR_ROWS && deleted.meals < CLEAR_ROWS && deleted.pdfs < CLEAR_PDFS, cleanup: null });
+  });
   app.post('/api/settings', auth('admin'), (req, res) => {
     const { printer: p, source: s } = req.body;
     if (p) {

@@ -1,6 +1,6 @@
 """Rasterize generated labels at the Zebra ZD220D's 203 dpi and decode every QR.
-Run after LABEL_TEST_OUTPUT=/tmp/mawayid-labels npm test:
-  python scripts/verify_labels.py /tmp/mawayid-labels
+Run after LABEL_TEST_OUTPUT=/tmp/mawaid-labels npm test:
+  python scripts/verify_labels.py /tmp/mawaid-labels
 Dependencies: python -m pip install pymupdf Pillow zxing-cpp
 """
 import json

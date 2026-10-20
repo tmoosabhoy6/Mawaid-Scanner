@@ -3,6 +3,7 @@
  * Namespaced: does not define/replace doGet, flattenZiyaratSchedule, or their helpers.
  * The only trigger created is MAWAYID_refreshTours, every five minutes.
  * No existing trigger is deleted or changed.
+ * The MAWAYID_ prefix is kept unchanged so installed triggers and Script Properties keep working.
  *
  * Script Properties (Project Settings):
  *   MAWAYID_APP_URL       HTTPS origin of this app, no trailing slash
@@ -78,7 +79,7 @@ function MAWAYID_refreshTours(force) {
       headers:{Authorization:'Bearer '+secret}, payload:JSON.stringify(payload), muteHttpExceptions:true });
     if(response.getResponseCode()!==200)throw new Error('App sync failed (HTTP '+response.getResponseCode()+'). Check app source settings and token.');
     if(times && force!==true)due.forEach(function(t){props.setProperty('MAWAYID_LAST_'+t,localDate);});
-    Logger.log('Mawayid Tours sync: '+built.tours.length+' stays; '+built.warnings.length+' warnings.');
+    Logger.log('Mawaid Tours sync: '+built.tours.length+' stays; '+built.warnings.length+' warnings.');
     built.warnings.forEach(function(w){Logger.log(w);});
   } finally { lock.releaseLock(); }
 }

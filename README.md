@@ -1,4 +1,4 @@
-# Mawayid — Faize Husseini Karbala
+# Mawaid — Faiz-e-Husaini Karbala
 
 A shared meal-card system with a printing/admin interface at `/` and a camera/USB scanner at `/scanner`. All phones and the printing computer use the same HTTPS server and database. The scanner never grants offline admission.
 
@@ -10,10 +10,11 @@ The Cloudflare deployment serves **both apps from one Worker**, using D1 for sha
 - **Red**: unknown/replaced card, future arrival, expired departure, duplicate meal, withdrawn tour, person above updated PAX, or closed service. Network failure blocks admission.
 - Karbala time (`Asia/Baghdad`): breakfast **06:30–09:00**, lunch **12:30–15:00**, dinner **19:00–21:30**. Start is included; end is excluded. At exactly 09:00 breakfast is closed. Outside service, camera and manual scanning are disabled. Launch cutoff is **21 October 2026**; stays arriving earlier and departing on/after the cutoff are included.
 - One person has one entitlement for each meal per day. A database transaction and a unique `(person, date, meal)` key protect simultaneous scans across devices.
-- QR tokens are independent random 256-bit values with no personal data. Token hashes and saved PDFs are retained. Cloudflare also keeps an encrypted label manifest until the printing computer saves its PDF, allowing interrupted jobs to recover. PDFs contain recoverable QR codes and require administrator access.
+- QR tokens are independent random 256-bit values with no personal data. Token hashes and saved PDFs are retained. Cloudflare also keeps an encrypted label manifest until the printing computer saves its PDF, allowing interrupted jobs to recover. PDFs contain recoverable QR codes and require administrator access. QR codes and the calligraphy are drawn as vectors, so a label adds about 2.5 KB to its PDF.
 - **No lifetime lost-card replacement cap.** Select the original person(s), generate fresh QR codes, and revoke their previous cards. Their consumed meals remain consumed. A 50-person tour with five replacements still has 50 people. The printed person number identifies the slot whose card is being replaced.
 - Re-entering an existing tour ID and arrival date finds that stay instead of creating extra meal capacity. The same external tour ID can be used for another stay with another arrival date. “Submit & print” on an existing stay opens its replacement selection. This preserves the requested duplicate-ID workflow without turning lost cards into extra people.
 - Label PDFs are saved before a print attempt. A failed printer connection can be retried from Print log without issuing new QR codes. An old PDF can contain revoked codes; reprinting never reactivates them. No dashboard or tour-edit screen is included.
+- A replacement records the card the operator saw. If another operator replaced that card first, the second request is refused instead of revoking the newer card.
 
 ## Current verification and remaining setup
 
@@ -24,13 +25,26 @@ The code is implemented and covered by automated API, date-boundary, concurrency
 Before going live:
 
 1. Deploy the Cloudflare Worker with D1 using [these instructions](cloudflare/README.md), or use the persistent Node server below. Configure the three secrets. Cloudflare uses D1; the Node server's SQLite file requires a persistent disk.
-2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
+2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and the Karbala al-Mualla calligraphy above the guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
 3. The confirmed source mapping is **arrival = Pehli Ziyarat**, **departure = Wada Ziyarat + one calendar day**. Departure remains included in meal eligibility. Manually entered tours use the actual departure date directly; no extra day is added to manual entries.
 4. Install the separate Apps Script file and its trigger as described below. The connected Google Sheets tools can read the spreadsheet but cannot install Apps Script code or triggers.
 5. Install the Zebra driver and QZ Tray on the USB-connected printing computer; verify the connection/operating system. Run one physical print and scan it using the actual gate phone, then scan it again to verify a red result. Verify the next meal separately.
-6. The supplied images show Najaf branding, not a standalone Karbala calligraphy asset. The current label uses a clear text header. Supply the Karbala artwork to reproduce its exact lettering.
+6. The sticker header is a vector trace of the supplied كربلاء المعلى artwork (`src/karbala-calligraphy.js`), in maroon `#741505`, followed by **FAIZ-E-HUSAINI**. Check one physical sticker: the ZD220D prints it in black.
 
-The Zebra **ZD220D is a monochrome direct-thermal printer**. The saved PDF has maroon styling; this printer's stickers are black. Ordinary browsers cannot silently command a USB printer. QZ Tray bridges the browser to the driver; without a trusted signing certificate it prompts for approval. Silent trusted printing requires QZ's signed-message setup and a private signing key kept server-side. This app currently uses QZ's explicit approval flow.
+The Zebra **ZD220D is a monochrome direct-thermal printer**. The saved PDF shows the calligraphy and border in maroon; this printer's stickers are black. Ordinary browsers cannot silently command a USB printer. QZ Tray bridges the browser to the driver; without a trusted signing certificate it prompts for approval. Silent trusted printing requires QZ's signed-message setup and a private signing key kept server-side. This app currently uses QZ's explicit approval flow.
+
+## Storage: archive and clear
+
+Settings → **Free hosting storage** shows database use against the 500 MB D1 limit. Nothing is deleted automatically. Choose a date, then:
+
+- **Archive & clear** copies records to this computer, then clears them from the database. In Chrome or Edge, the first archive asks for a location and creates a **Mawaid Archive** folder there; the browser remembers it, and every archive becomes its own folder inside it (for example `Mawaid Archive/Archive 2026-11-02 21.40`). Other browsers download the same folder as a `.zip` file.
+- **Delete without archiving** clears the same records after a confirmation.
+
+Each archive folder holds `scan-log.csv`, `meals-served.csv`, `daily-meal-summary.csv`, `tours.csv`, `cards.csv`, `print-log.csv` and `read-me.txt`. Label PDFs are never archived.
+
+Clearing removes scan records and meals served dated **before** the chosen date, and the saved label PDFs of stays that departed before it. The date can be today at the latest, so today's admissions always remain and a guest can never receive a second meal. Tours, people and cards stay, so replacements keep working; a cleared PDF shows as **PDF cleared** in Print log.
+
+Cloudflare counts every deleted row and index entry as a database write (100,000 per day on the free plan, reset at 03:00 Karbala time). Clearing runs in small chunks and stops for the day after 40,000 writes, so scanning keeps the rest. A very large clean-up resumes the next day. Archive again before continuing; each archive is a complete snapshot of what remains.
 
 ## Run locally
 
@@ -65,6 +79,7 @@ Use online SQLite backups, including the WAL, rather than copying just the live 
 
 ```sh
 node --env-file=.env scripts/backup.js /SAFE_BACKUP_DIRECTORY/mawayid.sqlite
+# The database file keeps its original mawayid.sqlite name so existing installations keep their data.
 ```
 
 For restoration, stop the server, restore the backup as `DATA_DIR/mawayid.sqlite`, remove leftover `mawayid.sqlite-wal` and `mawayid.sqlite-shm` files from the stopped installation, then restart. Keep backups private because the database includes label PDFs and admissions. Persist `.data` across deploys; restarting must not reset meal usage.
@@ -73,7 +88,7 @@ For restoration, stop the server, restore the backup as `DATA_DIR/mawayid.sqlite
 
 The verified workbook is `12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE`. Its source is **KRB - 25**, destination **Tours**, and existing search output **DB_SEARCHABLE**. `Tours` was empty when inspected. No writes were made to it by this implementation.
 
-`apps-script/ToursSync.js` reads the main source independently; it does not call or edit `flattenZiyaratSchedule`, `runFlatten_`, their helpers, `doGet`, or `DB_SEARCHABLE`. All added global names start with `MAWAYID_`. It creates a separate five-minute `MAWAYID_refreshTours` trigger and never deletes or changes an existing trigger. Run setup as the spreadsheet owner once; other users should not install duplicate triggers.
+`apps-script/ToursSync.js` reads the main source independently; it does not call or edit `flattenZiyaratSchedule`, `runFlatten_`, their helpers, `doGet`, or `DB_SEARCHABLE`. All added global names start with `MAWAYID_` (the original prefix is kept so installed triggers and Script Properties keep working). It creates a separate five-minute `MAWAYID_refreshTours` trigger and never deletes or changes an existing trigger. Run setup as the spreadsheet owner once; other users should not install duplicate triggers.
 
 With the confirmed arrival and departure mapping:
 
@@ -106,8 +121,8 @@ For the actual generated PDF QR check:
 
 ```sh
 python -m pip install pymupdf Pillow zxing-cpp
-LABEL_TEST_OUTPUT=/tmp/mawayid-labels npm test
-python scripts/verify_labels.py /tmp/mawayid-labels
+LABEL_TEST_OUTPUT=/tmp/mawaid-labels npm test
+python scripts/verify_labels.py /tmp/mawaid-labels
 ```
 
 These use synthetic test guests. CI runs the same verification. A successful PDF decode does not establish real printer alignment, driver scaling, camera focus, lighting or local Wi-Fi performance; verify those using a physical sticker at the gate before admitting guests.

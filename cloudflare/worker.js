@@ -1,5 +1,6 @@
 import { serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE } from '../src/rules.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
+import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
 const DEFAULT_SOURCE={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:[]};
@@ -75,9 +76,9 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/tours'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
-  return json(await all(db,`SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
+  return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
    (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000`,arrival,arrival,q,q,q));
+   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000) x`,arrival,arrival,q,q,q));
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192));}catch(e){throw fail(e.message);}
@@ -92,8 +93,10 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  if(batchPath){
   const [,id,action]=batchPath;
   if(action==='pdf'&&method==='GET'){
-   const row=await first(db,'SELECT pdf FROM batches WHERE id=?',id);if(!row?.pdf)throw fail('The label PDF still needs to be generated. Use Finish PDF in Print log.',409);
-   return new Response(new Uint8Array(row.pdf),{headers:{'Content-Type':'application/pdf','Content-Disposition':`inline; filename="mawayid-${id}.pdf"`,'Cache-Control':'no-store'}});
+   const row=await first(db,'SELECT pdf,printer_status FROM batches WHERE id=?',id);
+   if(row?.printer_status==='pdf_cleared')throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.',410);
+   if(!row?.pdf)throw fail('The label PDF still needs to be generated. Use Finish PDF in Print log.',409);
+   return new Response(new Uint8Array(row.pdf),{headers:{'Content-Type':'application/pdf','Content-Disposition':`inline; filename="mawaid-${id}.pdf"`,'Cache-Control':'no-store'}});
   }
   if(action==='pdf'&&method==='POST'){
    const data=await boundedBody(request,1_500_000,true);
@@ -124,6 +127,18 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   if(body.source){const s=body.source;if(!/^[\w-]{20,100}$/.test(s.spreadsheetId)||typeof s.tab!=='string'||!s.tab.trim()||s.tab.length>100)throw fail('Enter a valid spreadsheet URL and tab name.');const times=s.dailyTimes||[];if(!Array.isArray(times)||times.length>24||times.some(t=>typeof t!=='string'||!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(t)))throw fail('Daily times must use HH:mm.');statements.push(settingStmt(db,'source',{spreadsheetId:s.spreadsheetId,tab:s.tab.trim(),dailyTimes:[...new Set(times)].sort()}));}
   if(statements.length)await db.batch(statements);return json({ok:true});
  }
+ if(path==='/api/archive'&&method==='GET'){
+  const today=serviceAt(clock()).date,before=archiveCutoff(url.searchParams.get('before')||today,today);
+  const counts=await first(db,archiveSql(true).counts,before),info=await stmt(db,'SELECT 1').all();
+  return json({before,today,counts,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000,cleanup:await cleanupUsage(db,clock())});
+ }
+ const dataset=path.match(/^\/api\/archive\/(scans|meals|tours|cards|prints)$/);
+ if(dataset&&method==='GET'){
+  const today=serviceAt(clock()).date,before=archiveCutoff(url.searchParams.get('before')||today,today),{after,limit}=archivePage(url);
+  const rows=await all(db,ARCHIVE_DATASETS[dataset[1]],before,after,limit);
+  return json({rows,next:rows.length===limit?rows.at(-1).cursor:null});
+ }
+ if(path==='/api/archive/clear'&&method==='POST')return clearArchived(db,await boundedBody(request,1024),clock());
  if(path==='/api/sync/request'&&method==='POST'){await settingStmt(db,'syncRequestedAt',stamp).run();return json({ok:true});}
  throw fail('Not found.',404);
 }
@@ -181,6 +196,22 @@ async function issueLabels(db,body,env,stamp){
  statements.push(stmt(db,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.person_id'),?,json_extract(value,'$.token_hash'),? FROM json_each(?)`,id,stamp,payload));
  try{await db.batch(statements);}catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',body.requestKey);if(existing)return json({...await batchManifest(db,existing.id,env),existing:true});throw error;}
  return json({id,count:cards.length,remaining,cards,printer,requiresPdfUpload:true},201);
+}
+async function cleanupUsage(db,now){
+ const day=cleanupDay(now),saved=await getSetting(db,'cleanupUsage',null);
+ return{day,limit:CLEANUP_WRITE_BUDGET,used:saved?.day===day?saved.rowsWritten:0};
+}
+// One bounded chunk per request keeps each invocation inside the free plan's CPU and write limits.
+async function clearArchived(db,body,now){
+ const today=serviceAt(now).date,before=archiveCutoff(body.before,today),usage=await cleanupUsage(db,now);
+ if(usage.used+CLEANUP_CHUNK_WRITES>usage.limit)throw fail('Today’s clean-up allowance is used up, so scanning keeps its share of the free plan. Continue after 3:00 am Karbala time.',429);
+ const sql=archiveSql(true);
+ const results=await db.batch([stmt(db,sql.clearScans,before),stmt(db,sql.clearMeals,before),stmt(db,sql.clearPdfs,before)]);
+ const deleted={scans:results[0].meta?.changes||0,meals:results[1].meta?.changes||0,pdfs:results[2].meta?.changes||0};
+ const written=results.reduce((sum,r)=>sum+Math.max(r.meta?.rows_written||0,r.meta?.changes||0),0);
+ const used=usage.used+written+1;
+ await settingStmt(db,'cleanupUsage',{day:usage.day,rowsWritten:used}).run();
+ return json({deleted,done:deleted.scans<CLEAR_ROWS&&deleted.meals<CLEAR_ROWS&&deleted.pdfs<CLEAR_PDFS,cleanup:{...usage,used}});
 }
 async function syncTours(db,body,stamp){
  const source=await getSetting(db,'source',DEFAULT_SOURCE);

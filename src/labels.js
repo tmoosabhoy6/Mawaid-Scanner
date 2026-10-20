@@ -8,7 +8,7 @@ export async function makeLabels(cards, settings = {}) {
   const doc = new PDFDocument({ size: [mm(widthMm), mm(heightMm)], margin: mm(3), autoFirstPage: false });
   const chunks = []; doc.on('data', chunk => chunks.push(chunk));
   const complete = new Promise((resolve, reject) => { doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject); });
-  await drawLabels(doc,cards,settings,(text,options)=>QRCode.toBuffer(text,options));
+  await drawLabels(doc,cards,settings,(text,options)=>QRCode.create(text,options));
   doc.end(); return complete;
 }
-// Rasterized PDF is used for QZ printing, so office text cannot inject printer commands.
+// QZ Tray rasterizes this PDF, so office text cannot inject printer commands.

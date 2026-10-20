@@ -13,7 +13,7 @@ test('browser PDF bundle generates the confirmed 3 by 2 inch label without Node 
  dom.window.Blob=Blob;
  dom.window.eval(readFileSync('public/vendor/pdf.js','utf8'));
  const sample={token:'A'.repeat(43),tour_id:'26/1234',office:'FH Kuwait',person_no:1,arrival:'2026-10-21',departure:'2026-10-24',printed_at:'2026-10-21T04:00:00Z'};
- const pdf=await dom.window.generateMawayidPdf([sample],{widthMm:76.2,heightMm:50.8});
+ const pdf=await dom.window.generateMawaidPdf([sample],{widthMm:76.2,heightMm:50.8});
  const buffer=Buffer.from(await pdf.arrayBuffer());assert.equal(buffer.subarray(0,5).toString(),'%PDF-');assert.ok(buffer.length>1000);assert.deepEqual(errors,[]);
  if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(process.env.LABEL_TEST_OUTPUT+'/browser-label.pdf',buffer);}
  }finally{dom.window.close();}

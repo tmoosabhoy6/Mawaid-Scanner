@@ -115,6 +115,33 @@ test('Cloudflare: closed meal boundaries, stay dates, roles and CSRF block admis
  }finally{await f.close();}
 });
 
+test('Cloudflare: archive pages records, clears in bounded chunks and respects the daily write allowance',async()=>{
+ const f=await fixture();try{
+ const t=await f.tour(2),b=await f.issue(t.id);
+ const pdf=await makeLabels(b.cards,b.printer);
+ assert.equal((await f.mf.dispatchFetch(`https://mawayid.test/api/batches/${b.id}/pdf`,{method:'POST',headers:{Cookie:f.cookies.admin,'Content-Type':'application/pdf'},body:pdf})).status,200);
+ for(const c of b.cards)assert.equal((await f.scan(c.token)).data.status,'green');
+ f.setTime('2026-10-22T04:00:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
+ const status=await f.call('/archive?before=2026-10-22');assert.equal(status.status,200);
+ assert.deepEqual(status.data.counts,{scans:2,meals:2,pdfs:0});assert.equal(status.data.cleanup.limit,40000);assert.equal(status.data.cleanup.used,0);
+ assert.equal((await f.call('/archive?before=2026-10-23')).status,400);assert.equal((await f.call('/archive/clear',{before:''})).status,400);assert.equal((await f.call('/archive/clear',{})).status,400);assert.equal((await f.call('/archive',undefined,'scanner')).status,403);
+ const page=await f.call('/archive/scans?before=2026-10-22&limit=1');assert.equal(page.data.rows.length,1);assert.ok(page.data.next);
+ assert.equal((await f.call(`/archive/scans?before=2026-10-22&after=${page.data.next}`)).data.rows.length,1);
+ assert.equal((await f.call('/archive/meals?before=2026-10-22')).data.rows.length,2);
+ assert.equal((await f.call('/archive/prints?before=2026-10-22')).data.rows[0].labels,2);
+ const cleared=await f.call('/archive/clear',{before:'2026-10-22'});assert.equal(cleared.status,200,JSON.stringify(cleared.data));
+ assert.deepEqual(cleared.data.deleted,{scans:2,meals:2,pdfs:0});assert.equal(cleared.data.done,true);assert.ok(cleared.data.cleanup.used>=4);
+ assert.equal((await f.scan(b.cards[0].token)).data.reason,'already_used');
+ f.setTime('2026-10-25T04:00:00Z');
+ assert.equal((await f.call('/archive/clear',{before:'2026-10-25'})).data.deleted.pdfs,1);
+ assert.equal((await f.call(`/batches/${b.id}/pdf`)).status,410);
+ assert.equal((await f.call('/batches')).data[0].printer_status,'pdf_cleared');assert.equal((await f.call('/tours')).data[0].batch_status,'pdf_cleared');
+ await f.db.prepare("INSERT INTO settings VALUES('cleanupUsage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({day:'2026-10-25',rowsWritten:35000})).run();
+ const refused=await f.call('/archive/clear',{before:'2026-10-25'});assert.equal(refused.status,429);assert.match(refused.data.error,/allowance/);
+ f.setTime('2026-10-26T04:00:00Z');assert.equal((await f.call('/archive/clear',{before:'2026-10-26'})).status,200);
+ }finally{await f.close();}
+});
+
 test('Cloudflare capacity: 2,000 people, 6,000 admissions, four concurrent phones',async(t)=>{
  const f=await fixture();try{
  const tour=await f.tour(2000),cards=[];
@@ -143,7 +170,7 @@ test('Cloudflare UI: failed PDF upload recovers the same cards through Print log
   if(options.headers?.['Content-Type']==='application/pdf'&&failUpload){failUpload=false;return Response.json({error:'Test interrupted upload'},{status:503});}
   return f.mf.dispatchFetch(new URL(path,w.location.href).href,{...options,headers:{...options.headers,Cookie:f.cookies.admin,'X-Test-Time':'2026-10-21T04:00:00Z'}});
  };
- w.generateMawayidPdf=(cards,settings)=>makeLabels(cards,settings);
+ w.generateMawaidPdf=(cards,settings)=>makeLabels(cards,settings);
  const append=d.head.appendChild.bind(d.head);
  d.head.appendChild=element=>{const result=append(element);if(element.src.endsWith('/vendor/pdf.js'))queueMicrotask(()=>element.onload());return result;};
  w.eval(readFileSync('public/app.js','utf8'));
