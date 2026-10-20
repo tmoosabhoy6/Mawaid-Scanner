@@ -90,6 +90,8 @@ The output columns are `Tour ID`, `Tour Name`, `Arrival Date`, `Departure Date`,
 
 Import is transactional and idempotent. It updates matching stays without replacing their cards or history. A decreased PAX blocks higher numbered people. A tour omitted from a successful authoritative snapshot is marked inactive and its cards turn red. An arrival-date correction overlapping an existing stay is rejected to avoid creating duplicate entitlements. Reconcile ambiguous stays in the source rather than generating extra tours.
 
+Completed historical stays whose actual departure is before the launch cutoff are omitted before validating their office/PAX or duplicate conflicts. This prevents unrelated old records from blocking current syncs. Arrivals before the cutoff remain eligible when Wada plus one day reaches the cutoff; conflicts affecting those stays still abort with source row numbers. Updating GitHub does not update the spreadsheet's Apps Script copy: paste the changed `apps-script/ToursSync.js` into its separate Tours file and run `MAWAYID_setupTours` again; existing Script Properties remain saved.
+
 Tours sync is periodic; scanner admissions and printing changes share the same live database immediately. If no Wada date exists, the app does not guess a departure date or an unlimited stay. Manual tour entry remains available with verified dates.
 
 ## Verification

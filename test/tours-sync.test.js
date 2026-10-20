@@ -22,6 +22,17 @@ test('duplicates coalesce; conflicting duplicates abort; old stays omitted',()=>
  assert.equal(parse([headers(),day('Sunday, October 18, 2026'),arrival,arrival,day('Monday, October 19, 2026'),row({departure:true})]).tours.length,0);
  assert.throws(()=>parse([headers(),day('Wednesday, October 21, 2026'),arrival,row({arrival:true,pax:10})]),/Conflicting/);
 });
+test('historical conflicts and invalid rows do not block a later valid visit by the same tour',()=>{
+ const result=parse([headers(),day('Sunday, October 26, 2025'),row({arrival:true,id:'25/4576',pax:7}),row({arrival:true,id:'25/4576',pax:9}),row({arrival:true,id:'25/4577',pax:'bad'}),
+ day('Friday, October 31, 2025'),row({departure:true,id:'25/4576',pax:7}),row({departure:true,id:'25/4577',pax:'bad'}),
+ day('Wednesday, October 21, 2026'),row({arrival:true,id:'25/4576',pax:4}),day('Thursday, October 22, 2026'),row({departure:true,id:'25/4576',pax:4})]);
+ assert.equal(result.tours.length,1);assert.equal(result.tours[0].pax,4);assert.equal(result.tours[0].arrival,'2026-10-21');assert.equal(result.tours[0].departure,'2026-10-23');
+});
+test('conflicting arrivals before cutoff still block if their actual departure reaches launch',()=>{
+ assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),/Conflicting.*rows 3 and 4/);
+ assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7}),row({departure:true,pax:9})]),/Conflicting/);
+ assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:'bad'}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),/Invalid office\/PAX/);
+});
 test('calendar parser rejects impossible dates and source globals are isolated',()=>{
  assert.equal(context.MAWAYID_date('Wednesday, February 30, 2026'),null);
  assert.equal(context.MAWAYID_date('Wednesday, October 21, 2026'),'2026-10-21');

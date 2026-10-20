@@ -103,11 +103,11 @@ function MAWAYID_buildTours(data, config) {
       if(!/^(?:\d{2}\/\d{1,5}|\d{4})$/.test(id))return;
       var pax=Number(String(row[c+3]||'').replace(/,/g,''));
       var office=String(row[c+1]||'').trim();
-      if(!office || !Number.isInteger(pax)||pax<1||pax>10000)throw new Error('Invalid office/PAX in source row '+(index+1)+'. Tours was not updated.');
+      var issue = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? 'Invalid office/PAX in source row '+(index+1)+'. Tours was not updated.' : null;
       if(!groups[id])groups[id]={arrivals:[],departures:[]};
       var events=groups[id][pair[1]], prior=events.filter(function(v){return v.date===date;})[0];
-      if(prior && (prior.pax!==pax || prior.office!==office))throw new Error('Conflicting duplicate '+id+' on '+date+'. Tours was not updated.');
-      if(!prior)events.push({date:date,office:office,pax:pax});
+      if(prior && (prior.pax!==pax || prior.office!==office))prior.issue='Conflicting duplicate '+id+' on '+date+' (rows '+prior.row+' and '+(index+1)+'). Tours was not updated.';
+      if(!prior)events.push({date:date,office:office,pax:pax,row:index+1,issue:issue});
     });
   });
   if(!sawArrivalHeader||!sawDepartureHeader)throw new Error('Source columns do not match the arrival/departure headers; refusing to change Tours.');
@@ -117,13 +117,19 @@ function MAWAYID_buildTours(data, config) {
     g.arrivals.forEach(function(arrival,i){
       var next=g.arrivals[i+1];
       var departures=g.departures.filter(function(d){return d.date>=arrival.date && (!next||d.date<next.date);});
+      // Validate only stays that can affect launch-day or later entitlements.
+      // Keep arrivals before the cutoff when Wada + 1 is on/after it.
+      var relevant = arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;});
+      if(!relevant)return;
+      if(arrival.issue)throw new Error(arrival.issue);
+      departures.forEach(function(d){if(d.issue)throw new Error(d.issue);});
       if(departures.length!==1){if(arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;}))warnings.push(id+' ('+arrival.date+'): needs exactly one Wada date before the next arrival; excluded.');return;}
       var departure=departures[0];if(MAWAYID_nextDay(departure.date)<config.cutoff)return;
       if(next && MAWAYID_nextDay(departure.date)>=next.date){warnings.push(id+': departure (Wada + 1 day) overlaps the next arrival; excluded.');return;}
       if(departure.pax!==arrival.pax){warnings.push(id+': arrival and Wada PAX differ; excluded.');return;}
       tours.push({tour_id:id,office:arrival.office,arrival:arrival.date,departure:MAWAYID_nextDay(departure.date),pax:arrival.pax});
     });
-    g.departures.filter(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
+    g.departures.filter(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){if(d.issue)throw new Error(d.issue);warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
   });
   tours.sort(function(a,b){return a.arrival.localeCompare(b.arrival)||a.tour_id.localeCompare(b.tour_id);});
   return {tours:tours,warnings:warnings};
