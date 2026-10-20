@@ -19,7 +19,8 @@ jobs:
           python-version: '3.12'
       - run: npm ci --no-audit --no-fund
       - run: npm run check
-      - run: npm run build
+      - run: npm run build:cloudflare
+      - run: npx cf deploy --mode production --dry-run --prebuilt
       - run: npm test
         env:
           LABEL_TEST_OUTPUT: /tmp/mawayid-labels

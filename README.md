@@ -2,13 +2,15 @@
 
 A shared meal-card system with a printing/admin interface at `/` and a camera/USB scanner at `/scanner`. All phones and the printing computer use the same HTTPS server and database. The scanner never grants offline admission.
 
+The Cloudflare deployment serves **both apps from one Worker**, using D1 for shared meal counts. See [Cloudflare setup](cloudflare/README.md) for the free-plan deployment, database migration, secrets and backup instructions. The Node server remains available for local testing or a persistent server.
+
 ## Implemented rules
 
 - **Green**: active, recognised card; current date falls within arrival and departure, inclusive; current meal is open; this person has not used that meal today.
 - **Red**: unknown/replaced card, future arrival, expired departure, duplicate meal, withdrawn tour, person above updated PAX, or closed service. Network failure blocks admission.
 - Karbala time (`Asia/Baghdad`): breakfast **06:30–09:00**, lunch **12:30–15:00**, dinner **19:00–21:30**. Start is included; end is excluded. At exactly 09:00 breakfast is closed. Outside service, camera and manual scanning are disabled. Launch cutoff is **21 October 2026**; stays arriving earlier and departing on/after the cutoff are included.
 - One person has one entitlement for each meal per day. A database transaction and a unique `(person, date, meal)` key protect simultaneous scans across devices.
-- QR tokens are independent random 256-bit values with no personal data. Only token hashes and saved PDFs are retained. A PDF necessarily contains recoverable QR codes and requires administrator access.
+- QR tokens are independent random 256-bit values with no personal data. Token hashes and saved PDFs are retained. Cloudflare also keeps an encrypted label manifest until the printing computer saves its PDF, allowing interrupted jobs to recover. PDFs contain recoverable QR codes and require administrator access.
 - **No lifetime lost-card replacement cap.** Select the original person(s), generate fresh QR codes, and revoke their previous cards. Their consumed meals remain consumed. A 50-person tour with five replacements still has 50 people. The printed person number identifies the slot whose card is being replaced.
 - Re-entering an existing tour ID and arrival date finds that stay instead of creating extra meal capacity. The same external tour ID can be used for another stay with another arrival date. “Submit & print” on an existing stay opens its replacement selection. This preserves the requested duplicate-ID workflow without turning lost cards into extra people.
 - Label PDFs are saved before a print attempt. A failed printer connection can be retried from Print log without issuing new QR codes. An old PDF can contain revoked codes; reprinting never reactivates them. No dashboard or tour-edit screen is included.
@@ -21,7 +23,7 @@ The code is implemented and covered by automated API, date-boundary, concurrency
 
 Before going live:
 
-1. Deploy one persistent server behind HTTPS and configure the three secrets below. Serverless ephemeral filesystems cannot host this database safely.
+1. Deploy the Cloudflare Worker with D1 using [these instructions](cloudflare/README.md), or use the persistent Node server below. Configure the three secrets. Cloudflare uses D1; the Node server's SQLite file requires a persistent disk.
 2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
 3. The confirmed source mapping is **arrival = Pehli Ziyarat**, **departure = Wada Ziyarat + one calendar day**. Departure remains included in meal eligibility. Manually entered tours use the actual departure date directly; no extra day is added to manual entries.
 4. Install the separate Apps Script file and its trigger as described below. The connected Google Sheets tools can read the spreadsheet but cannot install Apps Script code or triggers.
@@ -47,7 +49,7 @@ For local verification use `APP_ORIGIN=http://localhost:3000`. HTTP localhost su
 
 Open the admin page and sign in as Administrator. Open `/scanner` on gate phones and use the Scanner password. Scanner accounts cannot view tours, PDFs, settings, or scan logs. Sessions expire after 12 hours. There is no default password.
 
-## Deploy
+## Alternative: deploy the Node server
 
 Use a single Node process with persistent storage; the SQLite file and its WAL must live together on the same mounted disk. Multiple stateless replicas with separate disks would create independent meal counts and are unsupported.
 
