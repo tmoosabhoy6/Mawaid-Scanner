@@ -11,7 +11,7 @@ export async function fixture(options = {}) {
   const admin=request.agent(server),scanner=request.agent(server);
   await admin.post('/api/login').send({role:'admin',password:config.adminPassword}).expect(200);
   await scanner.post('/api/login').send({role:'scanner',password:config.scannerPassword}).expect(200);
-  await admin.post('/api/settings').send({printer:{widthMm:60,heightMm:90,name:'Zebra test'}}).expect(200);
+  await admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50.8,name:'Zebra test'}}).expect(200);
   return {db,app,admin,scanner,rendered,setTime(value){clock=new Date(value);},close(){server.close();db.close();}};
 }
 export async function tour(f,pax=2,extra={}) {

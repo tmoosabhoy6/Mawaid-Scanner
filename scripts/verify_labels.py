@@ -25,10 +25,12 @@ with fitz.open(folder / '50-labels.pdf') as doc:
             image.save(folder / 'label-preview.png')
     assert decoded == expected, 'PDF contains unexpected QR values'
     assert len(set(decoded)) == 50, 'QR values must be unique'
-    assert abs(doc[0].rect.width * 25.4 / 72 - 60) < .1
-    assert abs(doc[0].rect.height * 25.4 / 72 - 90) < .1
-print('50 / 50 labels: unique expected QR values decoded at 203 dpi; 60 × 90 mm pages verified.')
-for name, width_mm, height_mm in [('min', 40, 80), ('max', 104, 200)]:
+    assert 'Departure: 2026-10-23' in doc[0].get_text(), 'Departure date missing from the compact label'
+    assert 'Person: 1' in doc[0].get_text(), 'Person number missing from the compact label'
+    assert abs(doc[0].rect.width * 25.4 / 72 - 76.2) < .1
+    assert abs(doc[0].rect.height * 25.4 / 72 - 50.8) < .1
+print('50 / 50 labels: unique expected QR values decoded at 203 dpi; 3 × 2 inch (76.2 × 50.8 mm) pages verified.')
+for name, width_mm, height_mm in [('min', 40, 80), ('compact-min', 70, 50.8), ('actual', 76.2, 50.8), ('max', 104, 200)]:
     with fitz.open(folder / f'boundary-{name}.pdf') as doc:
         assert len(doc) == 1, f'{name} layout overflowed onto another page'
         page = doc[0]
@@ -38,4 +40,4 @@ for name, width_mm, height_mm in [('min', 40, 80), ('max', 104, 200)]:
         image = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
         decoded = zxingcpp.read_barcodes(image)
         assert len(decoded) == 1 and decoded[0].text == 'MW1:' + 'A' * 43, f'{name} QR did not decode'
-print('Minimum 40 × 80 mm and maximum 104 × 200 mm layouts: one page each; QR decodes at 203 dpi.')
+print('Actual 3 × 2 inch and supported boundary layouts: one page each; QR decodes at 203 dpi.')

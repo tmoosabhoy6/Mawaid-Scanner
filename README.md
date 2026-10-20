@@ -22,8 +22,8 @@ The code is implemented and covered by automated API, date-boundary, concurrency
 Before going live:
 
 1. Deploy one persistent server behind HTTPS and configure the three secrets below. Serverless ephemeral filesystems cannot host this database safely.
-2. Confirm the physical sticker dimensions and the computer's exact printer name in Settings. The displayed 60 × 90 mm size is a placeholder, not a measured size. Printing is blocked until confirmation. Supported labels are 40–104 mm wide and 80–200 mm high; smaller labels need a revised, tested layout.
-3. Confirm whether **Pehli Ziyarat really is arrival** and **Wadaa Ziyarat really is departure**. These are ziyarat dates, so the extractor stays disabled until explicitly confirmed. If they differ from actual stay dates, use the actual stay source instead.
+2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
+3. The confirmed source mapping is **arrival = Pehli Ziyarat**, **departure = Wada Ziyarat + one calendar day**. Departure remains included in meal eligibility. Manually entered tours use the actual departure date directly; no extra day is added to manual entries.
 4. Install the separate Apps Script file and its trigger as described below. The connected Google Sheets tools can read the spreadsheet but cannot install Apps Script code or triggers.
 5. Install the Zebra driver and QZ Tray on the USB-connected printing computer; verify the connection/operating system. Run one physical print and scan it using the actual gate phone, then scan it again to verify a red result. Verify the next meal separately.
 6. The supplied images show Najaf branding, not a standalone Karbala calligraphy asset. The current label uses a clear text header. Supply the Karbala artwork to reproduce its exact lettering.
@@ -73,23 +73,22 @@ The verified workbook is `12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE`. Its sou
 
 `apps-script/ToursSync.js` reads the main source independently; it does not call or edit `flattenZiyaratSchedule`, `runFlatten_`, their helpers, `doGet`, or `DB_SEARCHABLE`. All added global names start with `MAWAYID_`. It creates a separate five-minute `MAWAYID_refreshTours` trigger and never deletes or changes an existing trigger. Run setup as the spreadsheet owner once; other users should not install duplicate triggers.
 
-After confirming the date interpretation:
+With the confirmed arrival and departure mapping:
 
 1. Open the spreadsheet's **Extensions → Apps Script**. Add a **new script file** named `ToursSync`. Paste `apps-script/ToursSync.js` into it. Leave existing files untouched.
 2. Under **Project Settings → Script Properties**, add:
    - `MAWAYID_APP_URL`: the deployed app's HTTPS origin, without a trailing slash.
    - `MAWAYID_SYNC_TOKEN`: the server's `SYNC_TOKEN`.
-   - `MAWAYID_DATE_MAPPING_CONFIRMED`: `yes`, only after confirming that the two ziyarat dates match actual stay dates.
-3. Check `MAWAYID_CONFIG` if your source layout has changed. Live inspection found arrival IDs in **B**, office in **C**, PAX in **E**; departure IDs in **Q**, office in **R**, PAX in **T**. Merged date headings are parsed without expanding or altering merged cells.
+3. Check `MAWAYID_CONFIG` if your source layout has changed. Live inspection found arrival IDs in **B**, office in **C**, PAX in **E**; Wada IDs in **Q**, office in **R**, PAX in **T**. Merged date headings are parsed without expanding or altering merged cells.
 4. Run **MAWAYID_setupTours** manually once and authorise it. It validates, builds `Tours`, and sends a successful authenticated update before installing its own trigger. Existing trigger IDs are never touched.
 5. In the app's Settings, verify the workbook URL and destination tab. Tab names populate after the first successful sync. An alternative destination must be empty or have the exact Tours output headers. The source and `DB_SEARCHABLE` are blocked as destinations.
 6. Leave daily times blank for five-minute sync, or enter `HH:mm` times in Settings for daily scheduled syncs. Daily times run on the next five-minute trigger tick. **Request sync** bypasses the daily schedule on the next trigger tick; it is not an immediate browser pull.
 
-The output columns are `Tour ID`, `Tour Name`, `Arrival Date`, `Departure Date`, `PAX Count`. The script includes complete stays ending on or after **2026-10-21**, including guests already present at launch. It pairs each arrival with one departure before the next arrival, handles repeated visits, and excludes incomplete/ambiguous stays or PAX mismatches with warnings. Malformed rows, conflicting duplicates and unexpected headers abort instead of replacing data with an untrusted result. The app displays warnings and the last successful sync time.
+The output columns are `Tour ID`, `Tour Name`, `Arrival Date`, `Departure Date`, `PAX Count`. The script includes complete stays ending on or after **2026-10-21**, including guests already present at launch and guests whose Wada is 20 October but who depart on 21 October. It pairs each arrival with one Wada date, adds one calendar day to compute departure (including month/year rollovers), rejects overlapping stays, handles repeated visits, and excludes incomplete/ambiguous stays or PAX mismatches with warnings. Malformed rows, conflicting duplicates and unexpected headers abort instead of replacing data with an untrusted result. The app displays warnings and the last successful sync time.
 
 Import is transactional and idempotent. It updates matching stays without replacing their cards or history. A decreased PAX blocks higher numbered people. A tour omitted from a successful authoritative snapshot is marked inactive and its cards turn red. An arrival-date correction overlapping an existing stay is rejected to avoid creating duplicate entitlements. Reconcile ambiguous stays in the source rather than generating extra tours.
 
-Tours sync is periodic; scanner admissions and printing changes share the same live database immediately. If no departure exists, the app does not guess an unlimited stay. Manual tour entry remains available with verified dates.
+Tours sync is periodic; scanner admissions and printing changes share the same live database immediately. If no Wada date exists, the app does not guess a departure date or an unlimited stay. Manual tour entry remains available with verified dates.
 
 ## Verification
 

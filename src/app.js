@@ -39,7 +39,7 @@ export function createApp(options = {}) {
   });
   const getSetting = (key, fallback) => { const row = db.prepare('SELECT value FROM settings WHERE key=?').get(key); return row ? JSON.parse(row.value) : fallback; };
   const setSetting = (key, value) => db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value));
-  const printer = () => getSetting('printer', { widthMm: 60, heightMm: 90, name: 'ZDesigner ZD220-203dpi ZPL', confirmed: false });
+  const printer = () => getSetting('printer', { widthMm: 76.2, heightMm: 50.8, name: 'ZDesigner ZD220-203dpi ZPL', confirmed: true });
   const source = () => getSetting('source', { spreadsheetId: '12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE', tab: 'Tours', dailyTimes: [] });
   const auth = (role) => (req, res, next) => {
     const raw = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('mawayid_session='))?.slice(16);
@@ -182,7 +182,7 @@ export function createApp(options = {}) {
   app.post('/api/settings', auth('admin'), (req, res) => {
     const { printer: p, source: s } = req.body;
     if (p) {
-      if (![p.widthMm,p.heightMm].every(n => typeof n === 'number' && Number.isFinite(n)) || p.widthMm < 40 || p.widthMm > 104 || p.heightMm < 80 || p.heightMm > 200 || typeof p.name !== 'string' || p.name.length > 150) throw fail('Use a label width of 40–104 mm and height of 80–200 mm; enter the printer name.');
+      if (![p.widthMm,p.heightMm].every(n => typeof n === 'number' && Number.isFinite(n)) || p.widthMm < 40 || p.widthMm > 104 || p.heightMm < 50.8 || p.heightMm > 200 || (p.heightMm < 80 && p.widthMm < 70) || typeof p.name !== 'string' || p.name.length > 150) throw fail('Use a label width of 40–104 mm and height of 50.8–200 mm. Labels below 80 mm high need at least 70 mm width; enter the printer name.');
       setSetting('printer', { widthMm: p.widthMm, heightMm: p.heightMm, name: p.name, confirmed: true });
     }
     if (s) {

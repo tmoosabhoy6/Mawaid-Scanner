@@ -15,7 +15,7 @@ test('server restart preserves cards, PDFs, sessions and consumed meals',async()
  const options={...config,dataDir,now:()=>new Date('2026-10-21T04:00:00Z'),renderLabels:async(c,s)=>{captured=c;return makeLabels(c,s);}};
  app=createApp(options);let agent=request.agent(app);
  await agent.post('/api/login').send({password:config.adminPassword}).expect(200);
- await agent.post('/api/settings').send({printer:{widthMm:60,heightMm:90,name:'Test'}}).expect(200);
+ await agent.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50.8,name:'Test'}}).expect(200);
  const tour=await agent.post('/api/tours').send({tour_id:'26/1',office:'Test',arrival:'2026-10-21',departure:'2026-10-22',pax:1}).expect(201);
  const batch=await agent.post('/api/labels').send({tourIds:[tour.body.id],requestKey:randomUUID()}).expect(201);
  const code=`MW1:${captured[0].token}`;

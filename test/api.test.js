@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { fixture,tour,issue,scan,config } from './helpers.js';
-import { writeFileSync,mkdirSync } from 'node:fs';
+import { writeFileSync,mkdirSync,readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 test('50 unique cards; concurrent duplicate scans accept once; each meal resets daily',async()=>{
  const f=await fixture();try{
@@ -94,7 +95,8 @@ test('roles, CSRF, login, validation, duplicate stays and printing setup',async(
  const t=await tour(f,2);const duplicate=await f.admin.post('/api/tours').send({...t,pax:5}).expect(200);assert.equal(duplicate.body.existing,true);assert.equal(duplicate.body.pax,2);
  const other=await tour(f,1,{arrival:'2026-11-01',departure:'2026-11-02'});assert.notEqual(other.id,t.id);
  await f.admin.post('/api/labels').send({requestKey:randomUUID()}).expect(400);
- f.db.prepare("DELETE FROM settings WHERE key='printer'").run();await f.admin.post('/api/labels').send({tourIds:[t.id],requestKey:randomUUID()}).expect(400);
+ const defaults=await f.admin.get('/api/settings').expect(200);assert.equal(defaults.body.printer.widthMm,76.2);assert.equal(defaults.body.printer.heightMm,50.8);
+ f.db.prepare("INSERT INTO settings(key,value) VALUES('printer',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({widthMm:76.2,heightMm:50.8,name:'Test',confirmed:false}));await f.admin.post('/api/labels').send({tourIds:[t.id],requestKey:randomUUID()}).expect(400);
  const {headers}=await f.admin.get('/');assert.ok(headers['content-security-policy'].includes("script-src 'self'"));
  await f.admin.post('/api/logout').send({}).expect(200);await f.admin.get('/api/tours').expect(401);
  }finally{f.close();}
@@ -144,5 +146,34 @@ test('daily sync schedule, sync request and machine config enforce permissions',
  await f.scanner.get('/api/sync/config').expect(401);
  const result=await request(f.app).get('/api/sync/config').set('Authorization',`Bearer ${config.syncToken}`).expect(200);
  assert.deepEqual(result.body.dailyTimes,['06:00','12:00']);assert.ok(result.body.requestedAt);
+ }finally{f.close();}
+});
+
+
+test('Pehli/Wada import grants all meals on Wada plus one day, then expires',async()=>{
+ const f=await fixture();try{
+ const context={};vm.createContext(context);vm.runInContext(readFileSync('apps-script/ToursSync.js','utf8'),context);
+ const header=Array(20).fill('');header[1]='Pehli Ziyarat';header[16]='Wada Ziyarat';
+ const arrival=Array(20).fill('');arrival[1]='26/500';arrival[2]='Test office';arrival[4]='1';
+ const wada=Array(20).fill('');wada[16]='26/500';wada[17]='Test office';wada[19]='1';
+ const built=context.MAWAYID_buildTours([header,['Wednesday, October 21, 2026'],arrival,['Friday, October 23, 2026'],wada],context.MAWAYID_CONFIG);
+ await request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:built.tours}).expect(200);
+ const tour=(await f.admin.get('/api/tours')).body[0];assert.equal(tour.departure,'2026-10-24');
+ const {cards}=await issue(f,tour.id);assert.equal(cards[0].departure,'2026-10-24');
+ for(const time of ['2026-10-24T03:30:00Z','2026-10-24T09:30:00Z','2026-10-24T16:00:00Z']){
+ f.setTime(time);assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ }
+ f.setTime('2026-10-25T03:30:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'after_departure');
+ }finally{f.close();}
+});
+
+test('3 by 2 inch defaults and compact label validation match supported layouts',async()=>{
+ const f=await fixture();try{
+ f.db.prepare("DELETE FROM settings WHERE key='printer'").run();
+ const defaults=(await f.admin.get('/api/settings').expect(200)).body.printer;
+ assert.equal(defaults.widthMm,76.2);assert.equal(defaults.heightMm,50.8);assert.equal(defaults.confirmed,true);
+ await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50.8,name:'Zebra'}}).expect(200);
+ await f.admin.post('/api/settings').send({printer:{widthMm:69,heightMm:50.8,name:'Zebra'}}).expect(400);
+ await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50,name:'Zebra'}}).expect(400);
  }finally{f.close();}
 });

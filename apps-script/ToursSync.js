@@ -7,7 +7,7 @@
  * Script Properties (Project Settings):
  *   MAWAYID_APP_URL       HTTPS origin of this app, no trailing slash
  *   MAWAYID_SYNC_TOKEN    same secret as the app's SYNC_TOKEN
- *   MAWAYID_DATE_MAPPING_CONFIRMED   yes (ONLY after confirming the two dates)
+ * Confirmed stay rules: arrival = Pehli Ziyarat; departure = Wada Ziyarat + 1 day.
  * Optional: MAWAYID_DAILY_TIMES     comma-separated HH:mm in Asia/Baghdad;
  *   leave blank for five-minute sync. A daily time runs in the next five-minute tick.
  * Then run MAWAYID_setupTours once and authorise Sheets / UrlFetch / triggers.
@@ -15,7 +15,7 @@
 var MAWAYID_CONFIG = {
   spreadsheetId: '12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',
   sourceTab: 'KRB - 25', toursTab: 'Tours', cutoff: '2026-10-21',
-  // Verified from the live source headers: B=arrival tour ID, Q=departure tour ID.
+  // Verified from the live source headers: B=arrival tour ID, Q=Wada tour ID (departure is the next day).
   // Group/office, leader, and PAX follow each ID in the next three columns.
   arrivalIdColumn: 2, departureIdColumn: 17,
   headers: ['Tour ID','Tour Name','Arrival Date','Departure Date','PAX Count']
@@ -28,7 +28,6 @@ function MAWAYID_setupTours() {
 }
 function MAWAYID_refreshTours(force) {
   var props = PropertiesService.getScriptProperties();
-  if (props.getProperty('MAWAYID_DATE_MAPPING_CONFIRMED') !== 'yes') throw new Error('Confirm that Pehli Ziyarat is arrival and Wadaa Ziyarat is departure, then set MAWAYID_DATE_MAPPING_CONFIRMED=yes.');
   var url = String(props.getProperty('MAWAYID_APP_URL') || '').replace(/\/$/,'');
   var secret = props.getProperty('MAWAYID_SYNC_TOKEN') || '';
   if (!/^https:\/\/[^/?#]+$/.test(url) || secret.length < 32) throw new Error('Configure MAWAYID_APP_URL and MAWAYID_SYNC_TOKEN in Script Properties.');
@@ -118,15 +117,21 @@ function MAWAYID_buildTours(data, config) {
     g.arrivals.forEach(function(arrival,i){
       var next=g.arrivals[i+1];
       var departures=g.departures.filter(function(d){return d.date>=arrival.date && (!next||d.date<next.date);});
-      if(departures.length!==1){if(arrival.date>=config.cutoff || departures.some(function(d){return d.date>=config.cutoff;}))warnings.push(id+' ('+arrival.date+'): needs exactly one departure before the next arrival; excluded.');return;}
-      var departure=departures[0];if(departure.date<config.cutoff)return;
-      if(departure.pax!==arrival.pax){warnings.push(id+': arrival and departure PAX differ; excluded.');return;}
-      tours.push({tour_id:id,office:arrival.office,arrival:arrival.date,departure:departure.date,pax:arrival.pax});
+      if(departures.length!==1){if(arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;}))warnings.push(id+' ('+arrival.date+'): needs exactly one Wada date before the next arrival; excluded.');return;}
+      var departure=departures[0];if(MAWAYID_nextDay(departure.date)<config.cutoff)return;
+      if(next && MAWAYID_nextDay(departure.date)>=next.date){warnings.push(id+': departure (Wada + 1 day) overlaps the next arrival; excluded.');return;}
+      if(departure.pax!==arrival.pax){warnings.push(id+': arrival and Wada PAX differ; excluded.');return;}
+      tours.push({tour_id:id,office:arrival.office,arrival:arrival.date,departure:MAWAYID_nextDay(departure.date),pax:arrival.pax});
     });
-    g.departures.filter(function(d){return d.date>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
+    g.departures.filter(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
   });
   tours.sort(function(a,b){return a.arrival.localeCompare(b.arrival)||a.tour_id.localeCompare(b.tour_id);});
   return {tours:tours,warnings:warnings};
 }
 
 function MAWAYID_sheetText(value) { return /^[=+@-]/.test(String(value)) ? "'"+value : value; }
+
+function MAWAYID_nextDay(isoDate) {
+  var parts=isoDate.split('-').map(Number);
+  return new Date(Date.UTC(parts[0],parts[1]-1,parts[2]+1)).toISOString().slice(0,10);
+}
