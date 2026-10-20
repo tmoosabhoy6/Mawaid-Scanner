@@ -4,6 +4,17 @@ One Worker serves the printing/admin app at `/` and the gate app at `/scanner`. 
 
 The pinned official `cf` CLI and Vite plugin are beta releases. This project uses `cloudflare.config.ts`; do not generate a separate Wrangler configuration.
 
+## Connected Git builds
+
+The connected Worker is `mawaid-scanner` and its shared database is `mawayid-karbala`. Cloudflare's Git build settings must use:
+
+- Branch: `main`
+- Root directory: `/`
+- Build command: `npm run build:cloudflare`
+- Deploy command: `npx cf deploy --mode production --prebuilt`
+
+The default `npx wrangler deploy` does not read this project's `cloudflare.config.ts`. Runtime secrets belong in the Worker's Variables and Secrets settings, not in the public repository. The database UUID in the committed configuration is public configuration, not a credential.
+
 ## Publish
 
 Use Node 24 or newer. Connect the installed Cloudflare plugin to the intended account, or authenticate the CLI on a computer with access to Cloudflare:
@@ -21,7 +32,7 @@ Reuse an existing database with that name. If none exists, create it once:
 npx cf d1 create --name mawayid-karbala
 ```
 
-Copy the returned database UUID into the `DB` binding in `cloudflare.config.ts`, as `bindings.d1({id:'THE_RETURNED_UUID',name:'mawayid-karbala'})`. Do not invent an ID or create another database on each deployment. Check that `mawayid-karbala` is not an unrelated existing Worker before deploying to that name.
+Copy the returned database UUID into the `DB` binding in `cloudflare.config.ts`, as `bindings.d1({id:'THE_RETURNED_UUID',name:'mawayid-karbala'})`. Do not invent an ID or create another database on each deployment. The existing account's observed UUID is already recorded. Check that `mawaid-scanner` is the intended Worker before deploying to that name.
 
 Apply the migration to that exact database UUID before publishing:
 
