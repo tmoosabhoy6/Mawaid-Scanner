@@ -6,12 +6,13 @@ const e = escapeHtml;
 let role, currentView = '', camera = null, service = null, scannerTimer = null, scannerBusy = false, printSettings = null;
 const dates = v => v ? new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Baghdad'}).format(new Date(v)) : '—';
 const today = () => new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad'}).format(new Date());
-async function api(path, body) {
+async function apiResponse(path, body) {
   const response = await fetch(`/api${path}`, { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? {} : { 'Content-Type':'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const result = await response.json();
   if (!response.ok) { if (response.status === 401 && path !== '/login') login(); throw new Error(result.error || 'Request failed.'); }
-  return result;
+  return { result, response };
 }
+async function api(path, body) { return (await apiResponse(path, body)).result; }
 function notify(message) { $('#notice').textContent = message; $('#notice').classList.add('visible'); clearTimeout(notify.timer); notify.timer = setTimeout(()=>$('#notice').classList.remove('visible'),7000); }
 async function guard(fn) { try { await fn(); } catch (err) { notify(err.message); } }
 async function busy(button, fn) { if (button.disabled) return; button.disabled = true; try { await fn(); } finally { button.disabled = false; } }
@@ -41,8 +42,10 @@ window.addEventListener('hashchange',route);
 async function toursView(){
   $('#main').innerHTML=heading('Tours','Find an arrival date, select your tours, and print their meal cards.',`<button class="primary" id="newTour">＋ Add tour</button>`)+`<section class="panel"><form class="filters" id="tourFilters"><label>Arrival date<input type="date" name="arrival"></label><label>Tour ID or office<input name="q" placeholder="Search tours…"></label><button>Apply</button><button type="reset">Reset</button></form></section><section class="panel"><div class="tablebar"><span id="tourCount" class="muted">Loading…</span><button class="primary" id="printSelected" disabled>Print selected</button></div><div class="tablewrap" id="tourTable"></div></section>`;
   $('#newTour').onclick=()=>location.hash='generate';
-  const load=async()=>{const params=new URLSearchParams(new FormData($('#tourFilters')));const rows=await api(`/tours?${params}`);
-    $('#tourCount').textContent=`${rows.length} tour${rows.length===1?'':'s'}`;
+  const load=async()=>{const params=new URLSearchParams(new FormData($('#tourFilters')));const {result:rows,response}=await apiResponse(`/tours?${params}`);
+    const total=Number(response.headers?.get('X-Total-Count'))||rows.length,filtered=params.get('arrival')||params.get('q');
+    const count=n=>`${n.toLocaleString('en-GB')} ${filtered?'':'current and upcoming '}tour${n===1?'':'s'}`;
+    $('#tourCount').textContent=total>rows.length?`Showing ${rows.length.toLocaleString('en-GB')} of ${count(total)} — filter by arrival date or search to narrow the list`:count(rows.length);
     $('#tourTable').innerHTML=rows.length?`<table><thead><tr><th><input type="checkbox" id="allTours" aria-label="Select all unprinted tours"></th><th>Tour ID</th><th>Office</th><th>Arrival</th><th>Departure</th><th>PAX</th><th>Print log</th><th>Lost cards</th></tr></thead><tbody>${rows.map(t=>`<tr><td><input class="tour-check" type="checkbox" value="${e(t.id)}" aria-label="Select tour ${e(t.tour_id)}" ${t.issued>=t.pax?'disabled':''}></td><td><strong>${e(t.tour_id)}</strong></td><td>${e(t.office)}</td><td>${e(t.arrival)}</td><td>${e(t.departure)}</td><td>${e(t.pax)} <small>· ${e(t.issued)} issued</small></td><td>${t.batch_id?`<a href="/api/batches/${e(t.batch_id)}/pdf" target="_blank" rel="noopener">View PDF ↗</a>`:'<span class="chip">Not printed</span>'}</td><td><button class="replace" data-tour="${e(t.id)}" ${!t.issued?'disabled':''}>Replace cards</button></td></tr>`).join('')}</tbody></table>`:`<div class="empty"><h2>No tours to show</h2><p>Add a tour, or connect your Google Sheet in Settings.</p></div>`;
     const update=()=>{$('#printSelected').disabled=!$$('.tour-check:checked').length;};
     if($('#allTours'))$('#allTours').onchange=event=>{$$('.tour-check:not(:disabled)').forEach(c=>c.checked=event.target.checked);update();};

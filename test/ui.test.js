@@ -3,7 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
-import { fixture,tour,issue } from './helpers.js';
+import request from 'supertest';
+import { fixture,tour,issue,config,manyStays } from './helpers.js';
 const html=readFileSync('public/index.html','utf8'),js=readFileSync('public/app.js','utf8');
 async function waitFor(fn){for(let n=0;n<200;n++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw new Error('UI condition timed out');}
 function domFor(f,path='/'){
@@ -15,7 +16,7 @@ function domFor(f,path='/'){
   let req=options.method==='POST'?agent.post(path):agent.get(path);
   if(options.body)req=req.send(JSON.parse(options.body));
   const result=await req;
-  return {ok:result.status>=200&&result.status<300,status:result.status,json:async()=>result.body,arrayBuffer:async()=>result.body};
+  return {ok:result.status>=200&&result.status<300,status:result.status,headers:{get:name=>result.headers[name.toLowerCase()]??null},json:async()=>result.body,arrayBuffer:async()=>result.body};
  };
  w.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};
  w.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open');};
@@ -76,5 +77,17 @@ test('scanner: unused QR green, duplicate red, no yellow state and closed servic
  dom.window.close();f.setTime('2026-10-21T06:00:00Z');dom=domFor(f,'/scanner');
  await waitFor(()=>dom.window.document.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
  assert.equal(dom.window.document.querySelector('#startCamera').disabled,true);assert.equal(dom.window.document.querySelector('#manualSubmit').disabled,true);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('tours: count says current and upcoming by default and how many are shown when capped',async()=>{
+ const f=await fixture();let dom;try{
+ await request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:manyStays(35,40)}).expect(200);
+ f.setTime('2026-11-20T05:00:00Z');
+ dom=domFor(f);const w=dom.window,d=w.document;
+ await waitFor(()=>d.querySelector('#tourCount')?.textContent==='280 current and upcoming tours');
+ d.querySelector('[name=q]').value='bulk office';submit(w,d.querySelector('#tourFilters'));
+ await waitFor(()=>d.querySelectorAll('.tour-check').length===1000);
+ assert.equal(d.querySelector('#tourCount').textContent,'Showing 1,000 of 1,400 tours — filter by arrival date or search to narrow the list');
  }finally{dom?.window.close();f.close();}
 });

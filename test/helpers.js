@@ -23,3 +23,8 @@ export async function issue(f,id) {
   return {batch:response.body,cards:f.rendered.at(-1)};
 }
 export function scan(f,code,key=randomUUID()){return f.scanner.post('/api/scan').send({code:`MW1:${code}`,requestKey:key});}
+// Synthetic Sheet stays: `perDay` two-night tours arriving each day from START_DATE, in office groups.
+export function manyStays(days,perDay){
+  return Array.from({length:days*perDay},(_,n)=>{const day=Math.floor(n/perDay),date=offset=>new Date(Date.UTC(2026,9,21+day+offset)).toISOString().slice(0,10);
+    return {tour_id:`26/${n+1}`,office:`Bulk office ${n%5}`,arrival:date(0),departure:date(2),pax:1};});
+}

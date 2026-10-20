@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { fixture,tour,issue,scan,config } from './helpers.js';
+import { fixture,tour,issue,scan,config,manyStays } from './helpers.js';
 import { writeFileSync,mkdirSync,readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
@@ -175,5 +175,21 @@ test('3 by 2 inch defaults and compact label validation match supported layouts'
  await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50.8,name:'Zebra'}}).expect(200);
  await f.admin.post('/api/settings').send({printer:{widthMm:69,heightMm:50.8,name:'Zebra'}}).expect(400);
  await f.admin.post('/api/settings').send({printer:{widthMm:76.2,heightMm:50,name:'Zebra'}}).expect(400);
+ }finally{f.close();}
+});
+
+test('default tours list keeps current and upcoming stays in view past 1,000 tours; filters still reach old stays',async()=>{
+ const f=await fixture();try{
+ const stays=manyStays(35,40);
+ await request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:stays}).expect(200);
+ f.setTime('2026-11-19T22:30:00Z'); // 01:30 on 20 November in Karbala, still 19 November in UTC.
+ const list=await f.admin.get('/api/tours').expect(200);
+ assert.equal(list.body.length,280);assert.equal(list.headers['x-total-count'],'280');
+ assert.ok(list.body.every(t=>t.departure>='2026-11-20'));assert.equal(list.body.filter(t=>t.arrival==='2026-11-20').length,40);
+ const old=await f.admin.get('/api/tours').query({arrival:'2026-10-21'}).expect(200);
+ assert.equal(old.body.length,40);assert.ok(old.body.some(t=>t.tour_id==='26/1'));
+ assert.deepEqual((await f.admin.get('/api/tours').query({q:'26/1'})).body.map(t=>t.tour_id).slice(0,2),['26/1','26/10']);
+ const capped=await f.admin.get('/api/tours').query({q:'bulk office'}).expect(200);
+ assert.equal(capped.body.length,1000);assert.equal(capped.headers['x-total-count'],'1400');
  }finally{f.close();}
 });

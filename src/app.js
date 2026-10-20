@@ -4,7 +4,7 @@ import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
-import { eligibility, serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE } from './rules.js';
+import { eligibility, serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE, TOUR_LIST_LIMIT } from './rules.js';
 import { makeLabels } from './labels.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual(Buffer.from(x), Buffer.from(y)); };
@@ -68,11 +68,15 @@ export function createApp(options = {}) {
   app.get('/api/session', auth(), (req, res) => res.json({ role: req.role }));
   app.get('/api/service', auth(), (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, meals: MEALS, startDate: START_DATE }));
   app.get('/api/tours', auth('admin'), (req, res) => {
+    const arrival = req.query.arrival || '', q = req.query.q || '';
+    // Unfiltered, list only stays that have not departed so completed stays never crowd out new arrivals; filters still reach any tour.
+    const from = arrival || q ? '' : serviceAt(now()).date;
+    const where = `t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.departure>=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ?)`, args = [arrival, arrival, from, from, q, `%${q}%`, `%${q}%`];
     const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
       (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ?) ORDER BY t.arrival,t.tour_id`).all(
-      req.query.arrival || '', req.query.arrival || '', req.query.q || '', `%${req.query.q || ''}%`, `%${req.query.q || ''}%`);
-    res.json(rows);
+      FROM tours t WHERE ${where} ORDER BY t.arrival,t.tour_id LIMIT ${TOUR_LIST_LIMIT}`).all(...args);
+    const total = rows.length < TOUR_LIST_LIMIT ? rows.length : db.prepare(`SELECT COUNT(*) AS n FROM tours t WHERE ${where}`).get(...args).n;
+    res.set('X-Total-Count', String(total)).json(rows);
   });
   app.post('/api/tours', auth('admin'), (req, res) => {
     let t; try { t = validateTour(req.body); } catch (e) { throw fail(e.message); }

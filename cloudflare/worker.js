@@ -1,4 +1,4 @@
-import { serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE } from '../src/rules.js';
+import { serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE, TOUR_LIST_LIMIT } from '../src/rules.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
@@ -75,9 +75,14 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/tours'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
-  return json(await all(db,`SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
+  // Unfiltered, list only stays that have not departed so completed stays never crowd out new arrivals; filters still reach any tour.
+  const from=arrival||q?'':serviceAt(clock()).date;
+  const where=`t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.departure>=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0)`,args=[arrival,arrival,from,from,q,q,q];
+  const rows=await all(db,`SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
    (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000`,arrival,arrival,q,q,q));
+   FROM tours t WHERE ${where} ORDER BY t.arrival,t.tour_id LIMIT ${TOUR_LIST_LIMIT}`,...args);
+  const total=rows.length<TOUR_LIST_LIMIT?rows.length:(await first(db,`SELECT COUNT(*) AS n FROM tours t WHERE ${where}`,...args)).n;
+  return json(rows,200,{'X-Total-Count':String(total)});
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192));}catch(e){throw fail(e.message);}

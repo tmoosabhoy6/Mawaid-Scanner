@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { makeLabels } from '../src/labels.js';
 import { JSDOM } from 'jsdom';
+import { manyStays } from './helpers.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SCANNER_PASSWORD:'worker-scanner-password-6789',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 const migration=readFileSync('cloudflare/migrations/0001_initial.sql','utf8').replace(/^--.*$/gm,'');
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
@@ -158,4 +159,20 @@ test('Cloudflare UI: failed PDF upload recovers the same cards through Print log
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM batches').first()).n,1);
  assert.equal((await f.call(`/batches/${batch.id}/pdf`)).status,200);
  }finally{dom?.window.close();await f.close();}
+});
+
+test('Cloudflare: default tours list keeps current and upcoming stays in view past 1,000 tours; filters still reach old stays',async()=>{
+ const f=await fixture();try{
+ const synced=await f.call('/sync/tours',{spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:manyStays(35,40)},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
+ assert.equal(synced.status,200,JSON.stringify(synced.data));
+ f.setTime('2026-11-19T22:30:00Z'); // 01:30 on 20 November in Karbala, still 19 November in UTC.
+ const list=await f.call('/tours');
+ assert.equal(list.data.length,280);assert.equal(list.res.headers.get('X-Total-Count'),'280');
+ assert.ok(list.data.every(t=>t.departure>='2026-11-20'));assert.equal(list.data.filter(t=>t.arrival==='2026-11-20').length,40);
+ const old=await f.call('/tours?arrival=2026-10-21');
+ assert.equal(old.data.length,40);assert.ok(old.data.some(t=>t.tour_id==='26/1'));
+ assert.deepEqual((await f.call('/tours?q=26%2F1')).data.map(t=>t.tour_id).slice(0,2),['26/1','26/10']);
+ const capped=await f.call('/tours?q=bulk+office');
+ assert.equal(capped.data.length,1000);assert.equal(capped.res.headers.get('X-Total-Count'),'1400');
+ }finally{await f.close();}
 });

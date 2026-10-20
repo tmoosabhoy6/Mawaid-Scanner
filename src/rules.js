@@ -1,5 +1,7 @@
 export const TIME_ZONE = 'Asia/Baghdad';
 export const START_DATE = '2026-10-21';
+// Tours list cap; keeps the Worker within the free plan's CPU limit.
+export const TOUR_LIST_LIMIT = 1000;
 export const MEALS = [
   { id: 'breakfast', name: 'Breakfast', start: 390, end: 540, hours: '6:30–9:00 am' },
   { id: 'lunch', name: 'Lunch', start: 750, end: 900, hours: '12:30–3:00 pm' },
