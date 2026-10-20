@@ -4,3 +4,9 @@ node_modules/
 coverage/
 public/vendor/
 *.log
+
+.cloudflare/
+dist/
+.dev.vars*
+.env.*
+!.env.example

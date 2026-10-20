@@ -41,3 +41,13 @@ for name, width_mm, height_mm in [('min', 40, 80), ('compact-min', 70, 50.8), ('
         decoded = zxingcpp.read_barcodes(image)
         assert len(decoded) == 1 and decoded[0].text == 'MW1:' + 'A' * 43, f'{name} QR did not decode'
 print('Actual 3 × 2 inch and supported boundary layouts: one page each; QR decodes at 203 dpi.')
+with fitz.open(folder / 'browser-label.pdf') as doc:
+    assert len(doc) == 1
+    page = doc[0]
+    assert abs(page.rect.width * 25.4 / 72 - 76.2) < .1
+    assert abs(page.rect.height * 25.4 / 72 - 50.8) < .1
+    pix = page.get_pixmap(dpi=203)
+    decoded = zxingcpp.read_barcodes(Image.frombytes('RGB', (pix.width, pix.height), pix.samples))
+    assert len(decoded) == 1 and decoded[0].text == 'MW1:' + 'A' * 43
+    assert 'Departure: 2026-10-24' in page.get_text()
+print('Browser-generated 3 × 2 inch label: expected QR decodes at 203 dpi and departure text verified.')
