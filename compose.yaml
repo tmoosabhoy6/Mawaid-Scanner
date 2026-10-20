@@ -1,0 +1,13 @@
+services:
+  mawayid:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - mawayid-data:/app/.data
+    environment:
+      DATA_DIR: /app/.data
+volumes:
+  mawayid-data:
