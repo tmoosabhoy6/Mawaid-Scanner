@@ -75,7 +75,26 @@ test('scanner: unused QR green, duplicate red, no yellow state and closed servic
  assert.equal(d.querySelector('[class*=yellow]'),null);
  dom.window.close();f.setTime('2026-10-21T06:00:00Z');dom=domFor(f,'/scanner');
  await waitFor(()=>dom.window.document.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
- assert.equal(dom.window.document.querySelector('#startCamera').disabled,true);assert.equal(dom.window.document.querySelector('#manualSubmit').disabled,true);
+ assert.equal(dom.window.document.querySelector('#manualSubmit').disabled,true);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('scanner camera opens outside meal times but checks cards only while a meal is open',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T06:00:00Z');
+ dom=new JSDOM(html,{url:'https://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window,d=w.document;let decode,stopped=0;
+ w.fetch=async(url,options={})=>{const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;let req=options.method==='POST'?f.scanner.post(path):f.scanner.get(path);if(options.body)req=req.send(JSON.parse(options.body));const r=await req;return{ok:r.status<300,status:r.status,json:async()=>r.body};};
+ Object.defineProperty(w,'isSecureContext',{value:true});// jsdom does not implement secure contexts.
+ w.MawaidCamera=class{async start(camera,config,onDecode){decode=onDecode;}async stop(){stopped++;}clear(){}};
+ w.eval(js);
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
+ const button=d.querySelector('#startCamera');assert.equal(button.disabled,false);
+ button.click();await waitFor(()=>button.textContent==='Stop camera');
+ decode(`MW1:${cards[0].token}`);
+ await waitFor(()=>/not checked/.test(d.querySelector('#scanResult').textContent));
+ await new Promise(r=>setTimeout(r,100));assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
+ button.click();await waitFor(()=>button.textContent==='Start camera');assert.equal(stopped,1);
  }finally{dom?.window.close();f.close();}
 });
 

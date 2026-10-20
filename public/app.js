@@ -255,21 +255,25 @@ function zipBlob(entries){
 function downloadZip(filename,entries){const url=URL.createObjectURL(zipBlob(entries)),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 async function scannerView(){
   await stopScanner();currentView='scanner';
-  $('#app').innerHTML=`<div class="scanner-shell"><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47">Mawaid scanner</h1><button id="scannerLogout">Sign out</button></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div id="serviceMeals" class="meal-strip"></div><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Checking meal service…</strong></div><div class="camera-box" id="reader"></div><button class="primary" id="startCamera" disabled>Start camera</button><p class="scan-tip">Hold one QR inside the frame. Wait for the result before admitting anyone.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button disabled id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div>`;
+  $('#app').innerHTML=`<div class="scanner-shell"><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47">Mawaid scanner</h1><button id="scannerLogout">Sign out</button></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div id="serviceMeals" class="meal-strip"></div><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Checking meal service…</strong></div><div class="camera-box" id="reader"></div><button class="primary" id="startCamera">Start camera</button><p class="scan-tip" id="scanTip">Hold one QR inside the frame. Wait for the result before admitting anyone.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button disabled id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div>`;
   $('#scannerLogout').onclick=logout;
-  let lastCode='',lastAt=0,serviceOffset=0,closed=true;
+  // The camera may run at any time so staff can check it before service; cards are checked only while a meal is open.
+  let lastCode='',lastAt=0,serviceOffset=0,closed=true,offline=false;
+  const closedDetail=()=>camera?'The camera is on. Cards are checked only during the meal times above.':'Scanning is available only during the meal times above. You can start the camera now to check it.';
   const update=async()=>{
-    try{service=await api('/service');serviceOffset=new Date(service.serverTime).getTime()-Date.now();closed=!service.meal;
+    try{service=await api('/service');serviceOffset=new Date(service.serverTime).getTime()-Date.now();closed=!service.meal;offline=false;
       $('#serviceMeals').innerHTML=service.meals.map(m=>`<div class="${service.meal?.id===m.id?'current':''}">${e(m.name)}<span>${e(m.hours)}</span></div>`).join('');
-      $('#startCamera').disabled=closed||Boolean(camera);$('#manualSubmit').disabled=closed;
+      $('#manualSubmit').disabled=closed;
       $('#scannerStatus').textContent=`${service.meal?service.meal.name+' service open':'Meal service closed'} · Device connected`;
-      if(closed){await stopScannerCamera();showResult('','Meal service closed','Scanning is available only during the meal times above.');}
-      else if(!scannerBusy&&!lastAt)showResult('','Ready to scan',`${service.meal.name} · ${service.date}`);
-    }catch(err){closed=true;$('#startCamera').disabled=true;$('#manualSubmit').disabled=true;await stopScannerCamera();showResult('red','Connection unavailable','Admission is blocked until the server is reachable.');}
+      if(closed){if(Date.now()-lastAt>=5000)showResult('','Meal service closed',closedDetail());}
+      else if(!scannerBusy&&Date.now()-lastAt>=5000)showResult('','Ready to scan',`${service.meal.name} · ${service.date}`);
+    }catch(err){closed=true;offline=true;$('#manualSubmit').disabled=true;showResult('red','Connection unavailable','Admission is blocked until the server is reachable.');}
   };
-  async function stopScannerCamera(){if(camera){try{await camera.stop();}catch{}camera=null;}}
+  const cameraButton=()=>{$('#startCamera').textContent=camera?'Stop camera':'Start camera';$('#startCamera').classList.toggle('primary',!camera);};
+  async function stopScannerCamera(){if(camera){const running=camera;camera=null;try{await running.stop();}catch{}try{running.clear();}catch{}}cameraButton();}
   async function submit(code){
-    if(scannerBusy||closed)return; if(code===lastCode&&Date.now()-lastAt<3000)return;
+    if(scannerBusy)return; if(code===lastCode&&Date.now()-lastAt<3000)return;
+    if(closed){lastCode=code;lastAt=Date.now();showResult('red',offline?'Connection unavailable':'Meal service closed',offline?'This card was not checked. Admission is blocked until the server is reachable.':'This card was not checked. Scan it again during meal times.');beep(false);return;}
     scannerBusy=true;lastCode=code;lastAt=Date.now();
     showResult('','Checking card…','Please wait for the result.');
     try{const result=await api('/scan',{code,requestKey:crypto.randomUUID()});showResult(result.status,result.status==='green'?'ALLOW':'DO NOT ADMIT',result.message+(result.person_no?` · Person ${result.person_no}`:''));beep(result.status==='green');}
@@ -277,12 +281,19 @@ async function scannerView(){
     setTimeout(()=>{scannerBusy=false;},1300);
     setTimeout(()=>{if(Date.now()-lastAt>=4900&&!closed)showResult('','Ready to scan',service.meal?.name||'');},5000);
   }
-  $('#startCamera').onclick=()=>guard(async()=>{if(!window.isSecureContext)throw new Error('Camera access requires HTTPS.');if(!window.MawaidCamera)throw new Error('Camera library did not load. Reload the page.');camera=new window.MawaidCamera('reader');try{await camera.start({facingMode:'environment'},{fps:20,qrbox:{width:220,height:220}},decoded=>submit(decoded),()=>{});$('#startCamera').disabled=true;}catch(err){camera=null;throw new Error('Camera could not start. Allow camera access, or use a USB scanner.');}});
+  $('#startCamera').onclick=()=>guard(()=>busy($('#startCamera'),async()=>{
+    if(camera){await stopScannerCamera();if(closed&&!offline)showResult('','Meal service closed',closedDetail());return;}
+    if(!window.isSecureContext)throw new Error('Camera access requires HTTPS.');if(!window.MawaidCamera)throw new Error('Camera library did not load. Reload the page.');
+    const starting=new window.MawaidCamera('reader');
+    try{await starting.start({facingMode:'environment'},{fps:20,qrbox:{width:220,height:220}},decoded=>submit(decoded),()=>{});}
+    catch(err){try{starting.clear();}catch{}throw new Error(/NotAllowed|Permission/i.test(String(err?.name||err))?'Camera access was blocked. Allow the camera for this site in your browser settings, then try again.':'The camera could not start. Close other apps using the camera, or use a USB scanner.');}
+    camera=starting;cameraButton();if(closed&&!offline&&Date.now()-lastAt>=5000)showResult('','Meal service closed',closedDetail());
+  }));
   $('#manualScan').onsubmit=ev=>{ev.preventDefault();const input=$('#manualCode');submit(input.value.trim());input.value='';input.focus();};
   await update();
   scannerTimer=setInterval(async()=>{
     // Close locally at the exact server-aligned boundary; the server also checks every scan.
-    if(service?.meal){const current=new Intl.DateTimeFormat('en-GB',{timeZone:TIME_ZONE,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(Date.now()+serviceOffset));const [h,m]=current.split(':').map(Number);if(h*60+m>=service.meal.end&&!closed){closed=true;$('#manualSubmit').disabled=true;$('#startCamera').disabled=true;await stopScannerCamera();showResult('','Meal service closed','This meal period has ended.');}}
+    if(service?.meal){const current=new Intl.DateTimeFormat('en-GB',{timeZone:TIME_ZONE,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(Date.now()+serviceOffset));const [h,m]=current.split(':').map(Number);if(h*60+m>=service.meal.end&&!closed){closed=true;$('#manualSubmit').disabled=true;showResult('','Meal service closed','This meal period has ended. Cards are checked again at the next meal.');}}
     if(Date.now()-(update.last||0)>15000){update.last=Date.now();await update();}
   },1000);
 }

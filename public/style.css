@@ -152,7 +152,7 @@ dialog::backdrop{background:rgba(3,6,12,.7)}
 .camera-box{border-radius:14px;overflow:hidden;background:#000;min-height:220px;display:grid;place-items:center;margin:18px 0}
 .camera-box:empty:after{content:'Camera preview';color:#a3afc1}
 #reader video{max-width:100%}
-.scanner-shell .primary{width:100%}
+.scanner-shell .primary,#startCamera{width:100%}
 .manual{margin-top:22px}
 .manual summary{cursor:pointer;color:var(--muted)}
 .manual form{display:flex;gap:8px;margin-top:12px}
