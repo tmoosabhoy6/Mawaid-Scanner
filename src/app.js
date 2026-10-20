@@ -16,7 +16,7 @@ export function createApp(options = {}) {
   const config = { origin: process.env.APP_ORIGIN || 'http://localhost:3000',
     adminPassword: process.env.ADMIN_PASSWORD || '', scannerPassword: process.env.SCANNER_PASSWORD || '',
     syncToken: process.env.SYNC_TOKEN || '', dataDir: resolve(process.env.DATA_DIR || '.data'), ...options };
-  if (config.adminPassword.length < 12 || config.scannerPassword.length < 12 || config.syncToken.length < 32) throw new Error('Set ADMIN_PASSWORD and SCANNER_PASSWORD (12+ characters) and SYNC_TOKEN (32+ characters).');
+  if (!config.adminPassword || !config.scannerPassword || config.syncToken.length < 32) throw new Error('Set ADMIN_PASSWORD and SCANNER_PASSWORD and SYNC_TOKEN (32+ characters).');
   if (equal(config.adminPassword, config.scannerPassword)) throw new Error('Use different admin and scanner passwords.');
   const origin = new URL(config.origin);
   if (origin.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(origin.hostname)) throw new Error('APP_ORIGIN must use HTTPS outside localhost.');

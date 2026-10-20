@@ -52,7 +52,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   if(request.headers.get('Sec-Fetch-Site')==='cross-site')throw fail('Cross-site request rejected.',403);
  }
  if(path==='/api/health'&&method==='GET'){await first(db,'SELECT 1');return json({status:'ok',hosting:'cloudflare-free'});}
- if(!env.ADMIN_PASSWORD||env.ADMIN_PASSWORD.length<12||!env.SCANNER_PASSWORD||env.SCANNER_PASSWORD.length<12||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)throw fail('Configure the app passwords and sync token before signing in.',503);
+ if(!env.ADMIN_PASSWORD||!env.SCANNER_PASSWORD||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)throw fail('Configure the app passwords and sync token before signing in.',503);
  if(await equal(env.ADMIN_PASSWORD,env.SCANNER_PASSWORD,env.SYNC_TOKEN))throw fail('Configure different admin and scanner passwords.',503);
  if(path==='/api/login'&&method==='POST'){
   const body=await boundedBody(request,2048),role=body.role==='scanner'?'scanner':'admin';

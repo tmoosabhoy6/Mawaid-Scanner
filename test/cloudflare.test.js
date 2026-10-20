@@ -9,8 +9,9 @@ import { JSDOM } from 'jsdom';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SCANNER_PASSWORD:'worker-scanner-password-6789',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 const migration=readFileSync('cloudflare/migrations/0001_initial.sql','utf8').replace(/^--.*$/gm,'');
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
-async function fixture(){
- const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:compiled.outputFiles[0].text,compatibilityDate:'2026-10-20',d1Databases:['DB'],bindings:config}));
+async function fixture(overrides={}){
+ const credentials={...config,...overrides};
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:compiled.outputFiles[0].text,compatibilityDate:'2026-10-20',d1Databases:['DB'],bindings:credentials}));
  let db;try{db=await mf.getD1Database('DB');}catch(e){await mf.dispose();throw e;}
  const statements=migration.trim().split(/;\s*\n(?=(?:CREATE|PRAGMA))/).map(s=>s.trim()).filter(Boolean);
  for(const sql of statements)await db.prepare(sql).run();
@@ -23,12 +24,22 @@ async function fixture(){
   const data=res.headers.get('Content-Type')?.includes('application/json')?await res.json():new Uint8Array(await res.arrayBuffer());
   return{status:res.status,data,res};
  };
- for(const role of ['admin','scanner'])assert.equal((await call('/login',{role,password:role==='admin'?config.ADMIN_PASSWORD:config.SCANNER_PASSWORD},role)).status,200);
+ for(const role of ['admin','scanner'])assert.equal((await call('/login',{role,password:role==='admin'?credentials.ADMIN_PASSWORD:credentials.SCANNER_PASSWORD},role)).status,200);
  const tour=async(pax=2,extra={})=>{const r=await call('/tours',{tour_id:'26/1',office:'Test office',arrival:'2026-10-21',departure:'2026-10-24',pax,...extra});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const issue=async(id,key=randomUUID())=>{const r=await call('/labels',{tourIds:[id],requestKey:key});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const scan=(token,key=randomUUID())=>call('/scan',{code:'MW1:'+token,requestKey:key},'scanner');
  return{mf,db,call,tour,issue,scan,cookies,setTime(value){now=value;},close:()=>mf.dispose()};
 }
+
+test('Cloudflare: configured short passwords work only for their assigned role',async()=>{
+ const f=await fixture({SCANNER_PASSWORD:'S1',ADMIN_PASSWORD:'A1234'});try{
+ assert.equal((await f.call('/session')).data.role,'admin');
+ assert.equal((await f.call('/session',undefined,'scanner')).data.role,'scanner');
+ assert.equal((await f.call('/login',{role:'admin',password:'S1'},'none')).status,401);
+ assert.equal((await f.call('/login',{role:'scanner',password:'A1234'},'none')).status,401);
+ assert.equal((await f.call('/login',{role:'admin',password:''},'none')).status,401);
+ }finally{await f.close();}
+});
 
 test('Cloudflare: four phones cannot consume the same meal more than once',async()=>{
  const f=await fixture();try{
