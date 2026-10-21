@@ -40,7 +40,7 @@ Apply the migrations to that exact database UUID before publishing:
 npx cf d1 migrations apply THE_RETURNED_UUID --dir cloudflare/migrations
 ```
 
-Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it.
+Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it. `0003_safari_print_log.sql` only adds a table, so Safari sticker jobs appear in Print log.
 
 Prepare a private, git-ignored `.dev.vars` file. Use distinct random values for all three entries; there are no default passwords:
 

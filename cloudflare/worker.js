@@ -89,17 +89,33 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  // Safari cards print without a QR code, so they have no people, cards or scans.
  if(path==='/api/safaris'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
-  return json(await all(db,`SELECT * FROM safaris WHERE (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000`,arrival,arrival,q,q,q,q));
+  return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
+   (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
+   FROM safaris s WHERE (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000) x`,arrival,arrival,q,q,q,q));
  }
  if(path==='/api/safaris'&&method==='POST'){
   let s;try{s=validateSafari(await boundedBody(request,8192));}catch(e){throw fail(e.message);}
   const row={id:crypto.randomUUID(),...s,created_at:stamp};
   await run(db,'INSERT INTO safaris(id,office,tour_id,its,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',...Object.values(row));return json(row,201);
  }
+ // The printing computer draws Safari stickers and saves the PDF here before printing, so the job appears in Print log.
+ if(path==='/api/safaris/print'&&method==='POST'){
+  const key=url.searchParams.get('requestKey'),ids=[...new Set((url.searchParams.get('ids')||'').split(',').filter(Boolean))];
+  if(!keyValid(key))throw fail('A valid request key is required.');
+  if(!ids.length||ids.length>MAX_LABELS||ids.some(id=>!/^[\w-]{1,100}$/.test(id)))throw fail(`Select up to ${MAX_LABELS} Safari cards per print job.`);
+  const prior=await first(db,'SELECT id FROM batches WHERE request_key=?',key);if(prior)return json({id:prior.id,existing:true});
+  const data=await boundedBody(request,1_500_000,true);
+  if(new TextDecoder().decode(data.slice(0,5))!=='%PDF-'||!new TextDecoder().decode(data.slice(-100)).includes('%%EOF'))throw fail('Upload a generated PDF.');
+  if((await first(db,'SELECT COUNT(*) AS n FROM safaris WHERE id IN(SELECT value FROM json_each(?))',JSON.stringify(ids))).n!==ids.length)throw fail('Safari card not found.',404);
+  const id=crypto.randomUUID();
+  try{await db.batch([stmt(db,"INSERT INTO batches(id,created_at,kind,request_key,pdf,printer_status) VALUES(?,?,'safari',?,?,'generated')",id,stamp,key,data.buffer),stmt(db,'INSERT INTO safari_prints(batch_id,safari_id) SELECT ?,value FROM json_each(?)',id,JSON.stringify(ids))]);}
+  catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',key);if(existing)return json({id:existing.id,existing:true});throw error;}
+  return json({id,count:ids.length},201);
+ }
  const people=path.match(/^\/api\/tours\/([\w-]+)\/people$/);
  if(people&&method==='GET')return json(await all(db,'SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no',people[1]));
  if(path==='/api/labels'&&method==='POST')return issueLabels(db,await boundedBody(request,100000),env,stamp);
- if(path==='/api/batches'&&method==='GET')return json(await all(db,`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id) AS count,SUM(CASE WHEN c.revoked_at IS NULL THEN 1 ELSE 0 END) AS active_count FROM batches b JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`));
+ if(path==='/api/batches'&&method==='GET')return json(await all(db,`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`));
  const batchPath=path.match(/^\/api\/batches\/([\w-]+)\/(pdf|manifest|status)$/);
  if(batchPath){
   const [,id,action]=batchPath;

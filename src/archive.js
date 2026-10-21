@@ -14,11 +14,13 @@ export const ARCHIVE_DATASETS = {
     FROM tours t WHERE ?1<>'' AND t.rowid>?2 ORDER BY t.rowid LIMIT ?3`,
   cards: `SELECT c.rowid AS cursor,t.tour_id,t.office,t.arrival,p.person_no,c.created_at,c.revoked_at,c.batch_id FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id
     WHERE ?1<>'' AND c.rowid>?2 ORDER BY c.rowid LIMIT ?3`,
-  prints: `SELECT b.rowid AS cursor,b.id AS batch_id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_saved,(SELECT COUNT(*) FROM cards c WHERE c.batch_id=b.id) AS labels
+  prints: `SELECT b.rowid AS cursor,b.id AS batch_id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_saved,(SELECT COUNT(*) FROM cards c WHERE c.batch_id=b.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS labels
     FROM batches b WHERE ?1<>'' AND b.rowid>?2 ORDER BY b.rowid LIMIT ?3`,
 };
 // A label PDF can be cleared once every stay printed in it has departed before the cut-off date.
-const finishedBatch = `NOT EXISTS(SELECT 1 FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id WHERE c.batch_id=b.id AND t.departure>=?1)`;
+// An undated Safari card counts as departing on the day its stickers were printed.
+const finishedBatch = `NOT EXISTS(SELECT 1 FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id WHERE c.batch_id=b.id AND t.departure>=?1)
+  AND NOT EXISTS(SELECT 1 FROM safari_prints sp JOIN safaris s ON s.id=sp.safari_id WHERE sp.batch_id=b.id AND COALESCE(s.departure,substr(b.created_at,1,10))>=?1)`;
 export function archiveSql(envelope) {
   const stored = envelope ? '(b.pdf IS NOT NULL OR b.envelope IS NOT NULL)' : 'b.pdf IS NOT NULL';
   return {

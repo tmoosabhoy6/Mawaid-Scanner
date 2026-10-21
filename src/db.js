@@ -30,6 +30,9 @@ export function openDatabase(path) {
     CREATE TABLE IF NOT EXISTS safaris (id TEXT PRIMARY KEY, office TEXT, tour_id TEXT, its TEXT, arrival TEXT, departure TEXT,
       pax INTEGER CHECK(pax IS NULL OR pax>0), created_at TEXT NOT NULL,
       CHECK(arrival IS NULL OR departure IS NULL OR arrival<=departure));
+    CREATE TABLE IF NOT EXISTS safari_prints (batch_id TEXT NOT NULL REFERENCES batches(id), safari_id TEXT NOT NULL REFERENCES safaris(id),
+      PRIMARY KEY(batch_id,safari_id));
+    CREATE INDEX IF NOT EXISTS safari_prints_safari ON safari_prints(safari_id);
     CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, role TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);

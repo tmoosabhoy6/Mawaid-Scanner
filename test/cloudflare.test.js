@@ -4,12 +4,12 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { makeLabels } from '../src/labels.js';
+import { makeLabels,makeSafariLabels } from '../src/labels.js';
 import { JSDOM } from 'jsdom';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SCANNER_PASSWORD:'worker-scanner-password-6789',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -232,5 +232,24 @@ test('Cloudflare: scanning works before migration 0002 is applied, without per-m
  for(let n=0;n<3;n++)assert.equal((await f.scan(token)).data.status,'green');
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,4);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,0);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: Safari sticker PDFs are saved in Print log and can be viewed and reprinted',async()=>{
+ const f=await fixture();try{
+ const a=(await f.call('/safaris',{office:'A',arrival:'2026-10-21',departure:'2026-10-24',pax:3})).data,b=(await f.call('/safaris',{})).data;
+ const pdf=await makeSafariLabels([a,b],{widthMm:76.2,heightMm:50.8}),key=randomUUID();
+ const save=(query,body=pdf)=>f.mf.dispatchFetch(`https://mawayid.test/api/safaris/print?${query}`,{method:'POST',headers:{Cookie:f.cookies.admin,'Content-Type':'application/pdf','X-Test-Time':'2026-10-21T04:00:00Z'},body}).then(async r=>({status:r.status,data:await r.json()}));
+ const saved=await save(`requestKey=${key}&ids=${a.id},${b.id}`);assert.equal(saved.status,201,JSON.stringify(saved.data));
+ assert.equal((await save(`requestKey=${key}&ids=${a.id},${b.id}`)).data.id,saved.data.id);
+ assert.equal((await save(`requestKey=${randomUUID()}&ids=missing`)).status,404);assert.equal((await save(`requestKey=${randomUUID()}&ids=${a.id}`,'not a pdf')).status,400);
+ const log=(await f.call('/batches')).data;assert.equal(log.length,1);assert.equal(log[0].kind,'safari');assert.equal(log[0].count,2);assert.equal(log[0].active_count,2);assert.equal(log[0].pdf_ready,1);
+ const view=await f.call(`/batches/${saved.data.id}/pdf`);assert.equal(view.status,200);assert.deepEqual(view.data,new Uint8Array(pdf));
+ const listed=(await f.call('/safaris')).data.find(s=>s.id===a.id);assert.equal(listed.batch_id,saved.data.id);assert.equal(listed.batch_status,'generated');
+ assert.equal((await f.call(`/batches/${saved.data.id}/status`,{status:'printer_error'})).status,200);
+ assert.equal((await f.call('/archive/prints?before=2026-10-21')).data.rows[0].labels,2);
+ // Cleared only once every card in the job has ended: card A departs 24 October; the undated card counts from its print date.
+ f.setTime('2026-10-25T04:00:00Z');assert.equal((await f.call('/archive/clear',{before:'2026-10-24'})).data.deleted.pdfs,0);
+ assert.equal((await f.call('/archive/clear',{before:'2026-10-25'})).data.deleted.pdfs,1);assert.equal((await f.call(`/batches/${saved.data.id}/pdf`)).status,410);
  }finally{await f.close();}
 });

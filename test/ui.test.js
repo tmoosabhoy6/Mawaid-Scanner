@@ -13,7 +13,8 @@ function domFor(f,path='/'){
   const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;
   const agent=path.startsWith('/api/scan')||path==='/api/service'?f.scanner:f.admin;
   let req=options.method==='POST'?agent.post(path):agent.get(path);
-  if(options.body)req=req.send(JSON.parse(options.body));
+  if(options.headers?.['Content-Type']==='application/pdf')req=req.set('Content-Type','application/pdf').send(Buffer.from(await options.body.arrayBuffer()));
+  else if(options.body)req=req.send(JSON.parse(options.body));
   const result=await req;
   return {ok:result.status>=200&&result.status<300,status:result.status,json:async()=>result.body,arrayBuffer:async()=>result.body};
  };
@@ -101,10 +102,10 @@ test('scanner camera checks cards at any hour and toggles on and off',async()=>{
  }finally{dom?.window.close();f.close();}
 });
 
-test('Safari: added without any required field, printed without a QR code here and from Tours',async()=>{
+test('Safari: added without any required field, saved in Print log and printed without a QR code',async()=>{
  const f=await fixture();let dom;try{
  dom=domFor(f,'/#generate');const w=dom.window,d=w.document,printed=[];
- w.generateSafariPdf=async(safaris,settings)=>{printed.push({safaris,settings});return new w.Blob(['%PDF-test']);};
+ w.generateSafariPdf=async(safaris,settings)=>{printed.push({safaris,settings});return new w.Blob(['%PDF-test\n%%EOF\n']);};
  const append=d.head.appendChild.bind(d.head);
  d.head.appendChild=element=>{const result=append(element);if(element.src?.endsWith('/vendor/pdf.js'))queueMicrotask(()=>element.onload());return result;};
  await waitFor(()=>d.querySelector('#addSafari'));
@@ -114,17 +115,21 @@ test('Safari: added without any required field, printed without a QR code here a
  await waitFor(()=>printed.length===1&&d.querySelector('.safari-check'));
  const [card]=printed[0].safaris;assert.deepEqual([card.office,card.arrival,card.departure,card.pax],['Izan Caravan','2026-10-21','2026-10-24',12]);
  assert.equal(printed[0].settings.widthMm,76.2);
- // No QR printer here, so the notice explains how to retry; nothing was issued.
- await waitFor(()=>/could not be printed/.test(d.querySelector('#notice').textContent));
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n,0);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards').get().n,0);
- const row=d.querySelector('.safari-check').closest('tr');assert.match(row.textContent,/Safari/);assert.match(row.textContent,/Izan Caravan/);assert.match(row.textContent,/No QR code/);
+ // No QR Tray here: the PDF is still saved in Print log, no QR cards are issued, and the notice says what to do.
+ await waitFor(()=>/PDF saved in Print log\. The printer library did not load/.test(d.querySelector('#notice').textContent));
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM batches WHERE kind='safari' AND pdf IS NOT NULL").get().n,1);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards').get().n,0);
+ assert.equal(f.db.prepare("SELECT printer_status FROM batches").get().printer_status,'printer_error');
+ const row=d.querySelector('.safari-check').closest('tr');assert.match(row.textContent,/Safari/);assert.match(row.textContent,/Izan Caravan/);assert.ok(row.querySelector('a[href$="/pdf"]'),'View PDF link on the Safari row');
  row.querySelector('.print-safari').click();await waitFor(()=>printed.length===2);assert.equal(printed[1].safaris[0].office,'Izan Caravan');
+ await waitFor(()=>f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===2);
  // Selecting a Safari card and a tour prints the sticker and the tour's QR cards.
  await tour(f,1);d.querySelector('#tourFilters').dispatchEvent(new w.Event('submit',{cancelable:true}));
  await waitFor(()=>d.querySelector('.tour-check'));
  const all=d.querySelector('#allTours');all.checked=true;all.dispatchEvent(new w.Event('change'));assert.equal(d.querySelector('.safari-check').checked,false);
  d.querySelector('.safari-check').checked=true;d.querySelector('.safari-check').dispatchEvent(new w.Event('change'));d.querySelector('#printSelected').click();
- await waitFor(()=>printed.length===3&&f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===1);
+ await waitFor(()=>printed.length===3&&f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===4);
+ w.location.hash='prints';await waitFor(()=>/Safari stickers/.test(d.querySelector('#main table')?.textContent||''));
+ assert.equal([...d.querySelectorAll('#main tbody tr')].filter(r=>/Safari stickers/.test(r.textContent)).length,3);
  // An entirely blank Safari card is allowed.
  w.location.hash='generate';await waitFor(()=>d.querySelector('#addSafari'));
  submit(w,d.querySelector('#addSafari'),d.querySelector('#addSafari [value=save]'));

@@ -55,12 +55,12 @@ async function toursView(){
   let safaris=[];
   const tourRow=t=>`<tr><td><input class="tour-check" type="checkbox" value="${e(t.id)}" aria-label="Select tour ${e(t.tour_id||t.office)}" ${t.issued>=t.pax?'disabled':''}></td><td><strong>${e(t.tour_id||'—')}</strong></td><td>${e(t.its||'—')}</td><td>${e(t.office)}</td><td>${e(t.arrival)}</td><td>${e(t.departure)}</td><td>${e(t.pax)} <small>· ${e(t.issued)} issued</small></td><td>${printLogCell(t)}</td><td><button class="replace" data-tour="${e(t.id)}" ${!t.issued?'disabled':''}>Replace cards</button></td></tr>`;
   // A Safari card always prints as its QR-free sticker and can be printed again at any time.
-  const safariRow=s=>`<tr><td><input class="safari-check" type="checkbox" value="${e(s.id)}" aria-label="Select Safari ${e(s.office||s.tour_id||'card')}"></td><td>${s.tour_id?`<strong>${e(s.tour_id)}</strong> `:''}<span class="chip safari-chip">Safari</span></td><td>${e(s.its||'—')}</td><td>${e(s.office||'—')}</td><td>${e(s.arrival||'—')}</td><td>${e(s.departure||'—')}</td><td>${e(s.pax??'—')}</td><td><button class="print-safari" data-safari="${e(s.id)}">Print sticker</button></td><td><span class="muted">No QR code</span></td></tr>`;
+  const safariRow=s=>`<tr><td><input class="safari-check" type="checkbox" value="${e(s.id)}" aria-label="Select Safari ${e(s.office||s.tour_id||'card')}"></td><td>${s.tour_id?`<strong>${e(s.tour_id)}</strong> `:''}<span class="chip safari-chip">Safari</span></td><td>${e(s.its||'—')}</td><td>${e(s.office||'—')}</td><td>${e(s.arrival||'—')}</td><td>${e(s.departure||'—')}</td><td>${e(s.pax??'—')}</td><td>${printLogCell(s)}</td><td><button class="print-safari" data-safari="${e(s.id)}">Print sticker</button></td></tr>`;
   const load=async()=>{const params=new URLSearchParams(new FormData($('#tourFilters')));let tours;[tours,safaris]=await Promise.all([api(`/tours?${params}`),api(`/safaris?${params}`)]);
     // Stable sort: Safari cards follow the tours arriving on the same day; undated cards come last.
     const rows=[...tours,...safaris.map(s=>({...s,safari:true}))].sort((a,b)=>(a.arrival||'~').localeCompare(b.arrival||'~'));
     $('#tourCount').textContent=`${number(tours.length)} tour${tours.length===1?'':'s'}${safaris.length?` · ${number(safaris.length)} Safari`:''}`;
-    $('#tourTable').innerHTML=rows.length?`<table><thead><tr><th><input type="checkbox" id="allTours" aria-label="Select all unprinted tours"></th><th>Tour ID</th><th>ITS</th><th>Office</th><th>Arrival</th><th>Departure</th><th>PAX</th><th>Print log</th><th>Lost cards</th></tr></thead><tbody>${rows.map(r=>r.safari?safariRow(r):tourRow(r)).join('')}</tbody></table>`:`<div class="empty"><h2>No tours to show</h2><p>Add a tour, or connect your Google Sheet in Settings.</p></div>`;
+    $('#tourTable').innerHTML=rows.length?`<table><thead><tr><th><input type="checkbox" id="allTours" aria-label="Select all unprinted tours"></th><th>Tour ID</th><th>ITS</th><th>Office</th><th>Arrival</th><th>Departure</th><th>PAX</th><th>Print log</th><th>Actions</th></tr></thead><tbody>${rows.map(r=>r.safari?safariRow(r):tourRow(r)).join('')}</tbody></table>`:`<div class="empty"><h2>No tours to show</h2><p>Add a tour, or connect your Google Sheet in Settings.</p></div>`;
     const update=()=>{$('#printSelected').disabled=!$$('.tour-check:checked, .safari-check:checked').length;};
     if($('#allTours'))$('#allTours').onchange=event=>{$$('.tour-check:not(:disabled)').forEach(c=>c.checked=event.target.checked);update();};
     $$('.tour-check, .safari-check').forEach(c=>c.onchange=update);$$('.replace').forEach(b=>b.onclick=()=>guard(()=>replaceCards(b.dataset.tour)));
@@ -113,40 +113,49 @@ async function finishPdf(batch){
   const response=await fetch(`/api/batches/${batch.id}/pdf`,{method:'POST',headers:{'Content-Type':'application/pdf'},body:pdf});
   if(!response.ok){const result=await response.json();throw new Error(result.error||'The PDF could not be saved. Use Finish PDF in Print log.');}
 }
+// The browser reaches the USB printer through the QZ Tray app on this computer; its errors are explained in plain words.
+const VIEW_PDF_TIP='You can also open View PDF in Print log and print it from the browser at 100% scale (Actual size).';
 async function sendToPrinter(bytes,settings,jobName){
-  if(!window.qz)throw new Error('Printer library did not load. Reload the page.');
-  if(!qz.websocket.isActive())await qz.websocket.connect();
-  const printerName=await qz.printers.find(settings.name);
+  if(!window.qz)throw new Error(`The printer library did not load. Reload the page. ${VIEW_PDF_TIP}`);
+  if(!qz.websocket.isActive()){try{await qz.websocket.connect();}catch{throw new Error(`QZ Tray is not running on this computer, so the printer can’t be reached. Open the QZ Tray app (install it from qz.io if it is missing), then use Print PDF in Print log. ${VIEW_PDF_TIP}`);}}
+  let printerName;try{printerName=await qz.printers.find(settings.name);}catch{throw new Error(`QZ Tray can’t find a printer named “${settings.name}”. Check the printer name in Settings. ${VIEW_PDF_TIP}`);}
   let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);
   const config=qz.configs.create(printerName,{size:{width:settings.widthMm,height:settings.heightMm},units:'mm',colorType:'blackwhite',scaleContent:false,margins:0,jobName});
-  await qz.print(config,[{type:'pixel',format:'pdf',flavor:'base64',data:btoa(binary)}]);
+  try{await qz.print(config,[{type:'pixel',format:'pdf',flavor:'base64',data:btoa(binary)}]);}catch(err){throw new Error(`The printer reported a problem (${err?.message||err}). Check that it is on, has labels and is connected, then use Print PDF in Print log.`);}
 }
-async function printBatch(id){
+async function printBatch(id,jobName='Mawaid meal cards'){
   try {
     printSettings=(await api('/settings')).printer;
-    if(!window.qz)throw new Error('Printer library did not load. Reload the page.');
     const response=await fetch(`/api/batches/${id}/pdf`);if(!response.ok)throw new Error('Could not fetch the saved label PDF.');
-    await sendToPrinter(new Uint8Array(await response.arrayBuffer()),printSettings,'Mawaid meal cards');
+    await sendToPrinter(new Uint8Array(await response.arrayBuffer()),printSettings,jobName);
     await api(`/batches/${id}/status`,{status:'sent_to_printer'});notify('Job sent to the Zebra printer. Check the physical labels.');return true;
   } catch(err) {
     await api(`/batches/${id}/status`,{status:'printer_error'}).catch(()=>{});
-    notify(`PDF saved. Printer connection needs attention: ${err.message}. Open Print log to retry.`);return false;
+    notify(`PDF saved in Print log. ${err.message}`);return false;
   }
 }
-// Safari stickers have no QR code, so nothing is issued or saved: they are drawn on this computer and printed straight away.
+// Safari stickers have no QR code: this computer draws them, saves the PDF in Print log, then prints it like any label job.
+let pendingSafariJob=null;
 async function printSafaris(safaris){
   if(!safaris.length)return;
+  if(safaris.length>100)throw new Error('Print up to 100 Safari stickers at a time.');
+  const ids=safaris.map(s=>s.id).join(',');
+  // A retry after a failed save reuses the request key, so it never saves the same job twice.
+  if(!pendingSafariJob||pendingSafariJob.ids!==ids)pendingSafariJob={ids,key:crypto.randomUUID()};
   notify('Preparing Safari stickers…');
   await loadPdfLibrary();
   const settings=(await api('/settings')).printer,pdf=await window.generateSafariPdf(safaris,settings);
-  const what=safaris.length===1?'Safari sticker':`${safaris.length} Safari stickers`;
-  try{await sendToPrinter(new Uint8Array(await pdf.arrayBuffer()),settings,'Mawaid Safari stickers');notify(`${what} sent to the Zebra printer. Check the physical labels.`);}
-  catch(err){notify(`The ${what} could not be printed: ${err.message}. Use Print sticker on the Tours page to try again.`);}
+  const response=await fetch(`/api/safaris/print?${new URLSearchParams({requestKey:pendingSafariJob.key,ids})}`,{method:'POST',headers:{'Content-Type':'application/pdf'},body:pdf});
+  const result=await response.json();if(!response.ok)throw new Error(result.error||'The Safari PDF could not be saved. Please try again.');
+  pendingSafariJob=null;
+  notify('PDF saved in Print log. Sending to the printer…');
+  await printBatch(result.id,'Mawaid Safari stickers');
 }
+const printKind = kind => ({ replacement:'Replacement', safari:'Safari stickers' }[kind]||'New cards');
 const printStatus = { generated:'PDF saved', awaiting_pdf:'Waiting for PDF', sent_to_printer:'Sent to printer', printer_error:'Printer error', pdf_cleared:'PDF cleared' };
 async function printsView(){
   const batches=await api('/batches');
-  $('#main').innerHTML=heading('Print log','Every label PDF is saved here. Printing a PDF again uses the same QR codes.')+`<section class="panel tablewrap">${batches.length?`<table><thead><tr><th>Created · Karbala</th><th>Type</th><th>Labels</th><th>Status</th><th>Saved PDF</th><th>Action</th></tr></thead><tbody>${batches.map(b=>{const cleared=b.printer_status==='pdf_cleared',pending=b.pdf_ready===0&&!cleared;return `<tr><td>${e(dates(b.created_at))}</td><td>${b.kind==='replacement'?'Replacement':'New cards'}</td><td>${e(b.count)} <small>· ${e(b.active_count)} active</small></td><td><span class="chip ${b.printer_status==='printer_error'?'red-chip':b.printer_status==='sent_to_printer'?'green-chip':''}">${e(printStatus[b.printer_status]||b.printer_status.replaceAll('_',' '))}</span></td><td>${cleared?'<span class="muted">Cleared after the stay</span>':pending?'<span class="chip">PDF pending</span>':`<a href="/api/batches/${e(b.id)}/pdf" target="_blank" rel="noopener">View PDF</a>`}</td><td><button class="retry-print" data-pending="${pending}" data-id="${e(b.id)}" ${!b.active_count||cleared?'disabled':''}>${pending?'Finish PDF':'Print PDF'}</button></td></tr>`;}).join('')}</tbody></table>`:'<div class="empty"><h2>No label PDFs yet</h2><p>Select tours on the Tours page and choose Print selected.</p></div>'}</section><p>Older PDFs can include replaced QR codes; printing them again does not reactivate those codes. “Sent to printer” means QZ Tray accepted the job; check that the labels came out.</p>`;
+  $('#main').innerHTML=heading('Print log','Every label PDF is saved here, including Safari stickers. Printing a PDF again uses the same QR codes.')+`<section class="panel tablewrap">${batches.length?`<table><thead><tr><th>Created · Karbala</th><th>Type</th><th>Labels</th><th>Status</th><th>Saved PDF</th><th>Action</th></tr></thead><tbody>${batches.map(b=>{const cleared=b.printer_status==='pdf_cleared',pending=b.pdf_ready===0&&!cleared;return `<tr><td>${e(dates(b.created_at))}</td><td>${printKind(b.kind)}</td><td>${e(b.count)} <small>· ${e(b.active_count)} active</small></td><td><span class="chip ${b.printer_status==='printer_error'?'red-chip':b.printer_status==='sent_to_printer'?'green-chip':''}">${e(printStatus[b.printer_status]||b.printer_status.replaceAll('_',' '))}</span></td><td>${cleared?'<span class="muted">Cleared after the stay</span>':pending?'<span class="chip">PDF pending</span>':`<a href="/api/batches/${e(b.id)}/pdf" target="_blank" rel="noopener">View PDF</a>`}</td><td><button class="retry-print" data-pending="${pending}" data-id="${e(b.id)}" ${!b.active_count||cleared?'disabled':''}>${pending?'Finish PDF':'Print PDF'}</button></td></tr>`;}).join('')}</tbody></table>`:'<div class="empty"><h2>No label PDFs yet</h2><p>Select tours on the Tours page and choose Print selected.</p></div>'}</section><p>Older PDFs can include replaced QR codes; printing them again does not reactivate those codes. “Sent to printer” means QZ Tray accepted the job; check that the labels came out.</p>`;
   $$('.retry-print').forEach(b=>b.onclick=()=>guard(()=>busy(b,async()=>{if(b.dataset.pending==='true'){await finishPdf(await api(`/batches/${b.dataset.id}/manifest`));await printsView();}else await printBatch(b.dataset.id);})));
 }
 async function logsView(){
@@ -244,7 +253,7 @@ function archiveFiles(d,before,name){
     ['daily-meal-summary.csv',csv(['Service date','Tour ID','Office','PAX','Breakfast','Lunch','Dinner'],summary.map(r=>[r.date,r.tour_id,r.office,r.pax,r.breakfast,r.lunch,r.dinner]))],
     ['tours.csv',csv(['Tour ID','ITS','Office','Arrival','Departure','PAX','Cards issued','Source','Active','Added (Karbala)'],d.tours.map(t=>[t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.issued,t.source==='sheets'?'Google Sheet':'Added manually',t.active?'Yes':'No',karbalaTime(t.created_at)]))],
     ['cards.csv',csv(['Tour ID','Office','Arrival','Person','Card printed (Karbala)','Replaced (Karbala)','Print job'],d.cards.map(c=>[c.tour_id,c.office,c.arrival,c.person_no,karbalaTime(c.created_at),karbalaTime(c.revoked_at),c.batch_id]))],
-    ['print-log.csv',csv(['Created (Karbala)','Type','Labels','Status','PDF','Print job'],d.prints.map(b=>[karbalaTime(b.created_at),b.kind==='replacement'?'Replacement':'New cards',b.labels,printStatus[b.printer_status]||b.printer_status,b.printer_status==='pdf_cleared'?'Cleared':b.pdf_saved?'Saved in app':'Pending',b.batch_id]))],
+    ['print-log.csv',csv(['Created (Karbala)','Type','Labels','Status','PDF','Print job'],d.prints.map(b=>[karbalaTime(b.created_at),printKind(b.kind),b.labels,printStatus[b.printer_status]||b.printer_status,b.printer_status==='pdf_cleared'?'Cleared':b.pdf_saved?'Saved in app':'Pending',b.batch_id]))],
     ['read-me.txt',`Mawaid archive · Faiz-e-Husaini Karbala\r\n${name} (Karbala time)\r\n\r\nScan records and meals served are from before ${before}. Tours, cards and print jobs are a full copy of what the app held at this time.\r\nLabel PDFs are not included. Times are Karbala time (Asia/Baghdad).\r\n\r\nscan-log.csv            ${d.scans.length} scans, admitted and declined\r\nmeals-served.csv        ${d.meals.length} meals served\r\ndaily-meal-summary.csv  meals served per tour per day\r\ntours.csv               ${d.tours.length} tours\r\ncards.csv               ${d.cards.length} cards, including replaced cards\r\nprint-log.csv           ${d.prints.length} print jobs\r\n`],
   ];
 }

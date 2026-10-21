@@ -87,13 +87,31 @@ export function createApp(options = {}) {
   // Safari cards print without a QR code, so they have no people, cards or scans.
   app.get('/api/safaris', auth('admin'), (req, res) => {
     const arrival = req.query.arrival || '', q = req.query.q || '';
-    res.json(db.prepare(`SELECT * FROM safaris WHERE (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
+    res.json(db.prepare(`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
+      (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
+      FROM safaris s WHERE (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000) x`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
   });
   app.post('/api/safaris', auth('admin'), (req, res) => {
     let s; try { s = validateSafari(req.body); } catch (e) { throw fail(e.message); }
     const row = { id: uid(), ...s, created_at: now().toISOString() };
     db.prepare('INSERT INTO safaris(id,office,tour_id,its,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)').run(...Object.values(row));
     res.status(201).json(row);
+  });
+  // The printing computer draws Safari stickers and saves the PDF here before printing, so the job appears in Print log.
+  app.post('/api/safaris/print', auth('admin'), express.raw({ type: 'application/pdf', limit: '3mb' }), (req, res) => {
+    const key = req.query.requestKey, ids = [...new Set(String(req.query.ids || '').split(',').filter(Boolean))];
+    if (typeof key !== 'string' || !/^[\w-]{16,100}$/.test(key)) throw fail('A valid request key is required.');
+    if (!ids.length || ids.length > 100 || ids.some(id => !/^[\w-]{1,100}$/.test(id))) throw fail('Select up to 100 Safari cards per print job.');
+    const prior = db.prepare('SELECT id FROM batches WHERE request_key=?').get(key); if (prior) return res.json({ id: prior.id, existing: true });
+    const pdf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (pdf.subarray(0, 5).toString() !== '%PDF-' || !pdf.subarray(-100).toString().includes('%%EOF')) throw fail('Upload a generated PDF.');
+    if (db.prepare('SELECT COUNT(*) AS n FROM safaris WHERE id IN (SELECT value FROM json_each(?))').get(JSON.stringify(ids)).n !== ids.length) throw fail('Safari card not found.', 404);
+    const id = uid();
+    transaction(db, () => {
+      db.prepare("INSERT INTO batches(id,created_at,kind,request_key,pdf) VALUES(?,?,'safari',?,?)").run(id, now().toISOString(), key, pdf);
+      for (const safari of ids) db.prepare('INSERT INTO safari_prints VALUES(?,?)').run(id, safari);
+    });
+    res.status(201).json({ id, count: ids.length });
   });
   app.get('/api/tours/:id/people', auth('admin'), (req, res) => res.json(db.prepare(`SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no`).all(req.params.id)));
   app.post('/api/labels', auth('admin'), async (req, res) => {
@@ -149,7 +167,7 @@ export function createApp(options = {}) {
     });
     res.status(201).json(result);
   });
-  app.get('/api/batches', auth('admin'), (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
+  app.get('/api/batches', auth('admin'), (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
   app.get('/api/batches/:id/pdf', auth('admin'), (req, res) => {
     const batch = db.prepare('SELECT pdf,printer_status FROM batches WHERE id=?').get(req.params.id);
     if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.', 410);
