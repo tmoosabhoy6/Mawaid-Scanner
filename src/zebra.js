@@ -20,7 +20,7 @@ function compressRow(hex, previous) {
   for (let i = 0; i < body.length;) { let j = i; while (j < body.length && body[j] === body[i]) j++; out += run(body[i], j - i); i = j; }
   return zeros ? `${out},` : out;
 }
-// image: {width, height, data} RGBA pixels (canvas ImageData). Dark pixels print; the maroon artwork prints black.
+// image: {width, height, data} RGBA pixels (canvas ImageData). Dark pixels print.
 export function graphicField(image, threshold = 160) {
   const { width, height, data } = image, rowBytes = Math.ceil(width / 8), rows = [];
   let previous = null;

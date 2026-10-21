@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeLabels,makeSafariLabels } from '../src/labels.js';
-import { safariDates } from '../src/label-layout.js';
+import { drawLabels,safariDates } from '../src/label-layout.js';
+import PDFDocument from 'pdfkit';
+import QRCode from 'qrcode';
 import { writeFileSync,mkdirSync } from 'node:fs';
 const sample={token:'A'.repeat(43),tour_id:'26/1234',office:'A long office name for a narrow label layout',person_no:10000,arrival:'2026-10-21',departure:'2026-11-21',printed_at:'2026-10-21T04:00:00Z'};
 for(const [name,widthMm,heightMm] of [['min',40,80],['compact-min',70,50.8],['actual',76.2,50.8],['max',104,200]])test(`label layout ${widthMm} × ${heightMm} mm`,async()=>{
@@ -14,6 +16,16 @@ test('calligraphy is embedded once per PDF and vector QR labels stay small',asyn
  assert.equal(text.match(/\/Subtype \/Form/g).length,1);assert.equal(text.match(/\/Type \/Page\b/g).length,100);
  // The Cloudflare upload limit is 1.5 MB for a 100-label job; vector labels use a small fraction of it.
  assert.ok(pdf.length<400000,`100 labels used ${pdf.length} bytes`);
+});
+// The monochrome ZD220D halftones grey or colour into scattered dots; like the QR, every meal-card mark is solid black.
+test('meal cards print only solid black, with lines at least 3 printer dots thick',async()=>{
+ for(const [widthMm,heightMm] of [[76.2,50.8],[104,200]]){
+  const doc=new PDFDocument({size:[widthMm*72/25.4,heightMm*72/25.4],compress:false,autoFirstPage:false}),chunks=[];doc.on('data',c=>chunks.push(c));
+  const done=new Promise(r=>doc.on('end',r));await drawLabels(doc,[sample],{widthMm,heightMm},(t,o)=>QRCode.create(t,o));doc.end();await done;
+  const text=Buffer.concat(chunks).toString('latin1'),colours=[...text.matchAll(/^([\d. ]+) (scn|SCN|sc|SC|rg|RG|g|G|k|K)$/gm)];
+  assert.ok(colours.length>5);for(const [op,values] of colours)assert.ok(values.split(' ').every(v=>Number(v)===0),`${widthMm} × ${heightMm} mm: ${op}`);
+  for(const [,width] of text.matchAll(/^([\d.]+) w$/gm))assert.ok(Number(width)>=3*72/203-1e-6,`line ${width} pt is under 3 dots`);
+ }
 });
 const safari={office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12};
 for(const [name,widthMm,heightMm] of [['min',40,80],['compact-min',70,50.8],['actual',76.2,50.8],['max',104,200]])test(`Safari sticker ${widthMm} × ${heightMm} mm`,async()=>{
