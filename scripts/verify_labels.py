@@ -58,7 +58,7 @@ for name, width_mm, height_mm in [('min', 40, 80), ('compact-min', 70, 50.8), ('
         assert abs(page.rect.width * 25.4 / 72 - width_mm) < .1
         assert abs(page.rect.height * 25.4 / 72 - height_mm) < .1
         text = page.get_text()
-        assert 'Lunch/Dinner' in text and 'Izan Caravan' in text and 'PAX: 12' in text.replace('\n', ' '), f'{name} Safari text missing'
+        assert 'Lunch/Dinner' in text and 'Izan Card' in text and 'PAX: 12' in text.replace('\n', ' '), f'{name} Safari text missing'
         assert '21 Oct' in text and '24 Oct 2026' in text, f'{name} Safari dates missing'
         pix = page.get_pixmap(dpi=203)
         assert not zxingcpp.read_barcodes(Image.frombytes('RGB', (pix.width, pix.height), pix.samples)), f'{name} Safari sticker must not carry a QR code'

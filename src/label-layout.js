@@ -99,7 +99,7 @@ export async function drawLabels(doc, cards, settings, createQr) {
   }
 }
 // Safari (takeaway) sticker: the printed Lunch/Dinner card without a QR code.
-// Left: two star-pattern arches behind a medallion holding the society logo. Right: name, Lunch/Dinner, DATE and PAX.
+// Left: two star-pattern arches behind a medallion holding the society logo. Right: DATE, Izan Card, Lunch/Dinner and PAX.
 // Navy and gold are dark enough that the monochrome ZD220D prints them black, with the pattern lines left white.
 const NAVY = '#22336f', BLUE = '#2c4c9c', GOLD = '#8a6d28';
 const shortDate = (value, year) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'short', ...(year ? { year: 'numeric' } : {}) }).format(new Date(`${value}T00:00:00Z`));
@@ -165,7 +165,7 @@ export function drawSafariLabels(doc, safaris, settings) {
   const w = mm(widthMm), h = mm(heightMm), m = mm(1.8), landscape = w >= h * .9;
   for (const s of safaris) {
     doc.addPage();
-    const name = s.office || '', dates = safariDates(s.arrival, s.departure), pax = s.pax ? String(s.pax) : '';
+    const dates = safariDates(s.arrival, s.departure), pax = s.pax ? String(s.pax) : '';
     let x, width, rows;
     if (landscape) {
       const D = Math.min((h - 2 * m) * .52, w * .36), cx = m + mm(.5) + D / 2;
@@ -181,10 +181,9 @@ export function drawSafariLabels(doc, safaris, settings) {
     }
     const meal = 'Lunch/Dinner', mealSize = sizeFor(doc, 'Times-Bold', meal, width, mm(8.5)), small = Math.min(mealSize * .46, 11);
     captioned(doc, 'DATE', dates, x, rows.date, width, small);
-    if (name) {
-      const nameSize = Math.max(small, sizeFor(doc, 'Times-Roman', name, width, mealSize * .62));
-      doc.font('Times-Roman').fontSize(nameSize).fillColor(BLUE).text(fit(doc, name, width), x, rows.name - nameSize * .5, { width, align: 'center', lineBreak: false });
-    }
+    // Every Safari sticker is headed "Izan Card", as printed on the card; the office name is not printed.
+    const title = 'Izan Card', titleSize = sizeFor(doc, 'Times-Roman', title, width, mealSize * .62);
+    doc.font('Times-Roman').fontSize(titleSize).fillColor(BLUE).text(title, x, rows.name - titleSize * .5, { width, align: 'center', lineBreak: false });
     doc.font('Times-Bold').fontSize(mealSize).fillColor(NAVY).text(meal, x, rows.meal - mealSize * .5, { width, align: 'center', lineBreak: false });
     captioned(doc, 'PAX', pax, x, rows.pax, width * .62, small * 1.15);
   }
