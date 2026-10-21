@@ -23,7 +23,7 @@ test('each 3 × 2 inch sticker becomes one gap-sensed, direct-thermal ZPL label 
   for (const [zpl, count] of [[cards, 2], [safari, 1]]) {
     const formats = zpl.trim().split('\n');
     assert.equal(formats.length, count, 'one ^XA…^XZ per sticker');
-    for (const f of formats) assert.match(f, /^\^XA~SD15\^MNY\^MTD\^MMT\^PON\^LH0,0\^PW609\^LL406\^FO0,0\^GFA,31262,31262,77,[^^]+\^FS\^PQ1\^XZ$/);
+    for (const f of formats) assert.match(f, /^\^XA\^MNY\^MTD\^MMT\^PON\^LH0,0\^PW609\^LL406\^MD0\^FO0,0\^GFA,31262,31262,77,[^^]+\^FS\^PQ1\^XZ$/);
     for (const label of decodeLabels(zpl)) {
       assert.equal(label.rows.length, 406);
       // Printed ink covers a real share of the sticker: never blank, never a solid black block.
@@ -34,12 +34,11 @@ test('each 3 × 2 inch sticker becomes one gap-sensed, direct-thermal ZPL label 
   assert.ok(cards.length < 2 * 40000, `a label is ${cards.length / 2} characters`);
 });
 test('printer tools: test sticker, saved gap-label settings', () => {
-  assert.match(testZpl(settings), /^\^XA~SD15\^MNY\^MTD\^MMT\^PON\^LH0,0\^PW609\^LL406\^FO8,8\^GB593,390,4\^FS.*Mawaid printer test.*\^PQ1\^XZ\n$/);
-  assert.equal(saveMediaZpl(settings), '^XA~SD15^MNY^MTD^MMT^PON^LH0,0^PW609^LL406^JUS^XZ\n');
+  assert.match(testZpl(settings), /^\^XA\^MNY\^MTD\^MMT\^PON\^LH0,0\^PW609\^LL406\^MD0\^FO8,8\^GB593,390,4\^FS.*Mawaid printer test.*\^PQ1\^XZ\n$/);
+  assert.equal(saveMediaZpl(settings), '^XA^MNY^MTD^MMT^PON^LH0,0^PW609^LL406^JUS^XZ\n');
 });
-test('darkness steps: the middle is the default, lighter steps burn less and print fewer edge dots', async () => {
-  const pdf = await makeLabels([sample], settings), black = async t => blackDots(decodeLabels(await pdfToZpl(pdfjs, new Uint8Array(pdf), { ...settings, tone: t }, fonts))[0]);
-  assert.match(testZpl({ ...settings, tone: 1 }), /^\^XA~SD9\^/); assert.match(testZpl({ ...settings, tone: 5 }), /^\^XA~SD21\^/); assert.match(testZpl({ ...settings, tone: 'x' }), /^\^XA~SD15\^/);
-  const [light, middle, dark] = [await black(1), await black(3), await black(5)];
-  assert.ok(light < middle && middle < dark, `${light} < ${middle} < ${dark}`);
+test('darkness steps shift the printer burn around its own setting and never change which dots print', async () => {
+  const pdf = await makeLabels([sample], settings), field = async t => (await pdfToZpl(pdfjs, new Uint8Array(pdf), { ...settings, tone: t }, fonts)).match(/\^GFA[^^]+/)[0];
+  assert.match(testZpl({ ...settings, tone: 1 }), /\^MD-6\^/); assert.match(testZpl({ ...settings, tone: 5 }), /\^MD6\^/); assert.match(testZpl({ ...settings, tone: 'x' }), /\^MD0\^/);
+  assert.equal(await field(1), await field(5));
 });

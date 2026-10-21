@@ -12,9 +12,10 @@ function run(char, n) {
   }
   return out;
 }
-// Five darkness steps, 3 in the middle: the printer's burn (~SD, 0–30) and how dark a grey edge pixel must be to print.
-export const TONES = { 1: [9, 100], 2: [12, 114], 3: [15, 128], 4: [18, 142], 5: [21, 156] };
-const tone = settings => TONES[settings.tone] || TONES[3];
+// Five darkness steps around the printer's own darkness (3, ^MD0). ^MD shifts the burn of the whole sticker;
+// it never changes which dots print, so the calligraphy keeps its shape.
+export const TONES = { 1: -6, 2: -3, 3: 0, 4: 3, 5: 6 };
+const tone = settings => TONES[settings.tone] ?? 0;
 function compressRow(hex, previous) {
   if (hex === previous) return ':';
   const body = hex.replace(/0+$/, ''), zeros = body.length < hex.length;
@@ -24,7 +25,8 @@ function compressRow(hex, previous) {
   return zeros ? `${out},` : out;
 }
 // image: {width, height, data} RGBA pixels (canvas ImageData). Dark pixels print.
-export function graphicField(image, threshold = TONES[3][1]) {
+// The threshold prints the Karbala calligraphy as approved on the first direct prints.
+export function graphicField(image, threshold = 160) {
   const { width, height, data } = image, rowBytes = Math.ceil(width / 8), rows = [];
   let previous = null;
   for (let y = 0; y < height; y++) {
@@ -45,8 +47,8 @@ export function graphicField(image, threshold = TONES[3][1]) {
   return `^GFA,${total},${total},${rowBytes},${rows.join('')}`;
 }
 // Gap (die-cut) labels, direct thermal, tear-off, label size in dots. ^PQ1 prints one copy of each label.
-export const mediaSetup = settings => `~SD${tone(settings)[0]}^MNY^MTD^MMT^PON^LH0,0^PW${dots(settings.widthMm)}^LL${dots(settings.heightMm)}`;
-export const labelZpl = (field, settings) => `^XA${mediaSetup(settings)}^FO0,0${field}^FS^PQ1^XZ\n`;
+export const mediaSetup = settings => `^MNY^MTD^MMT^PON^LH0,0^PW${dots(settings.widthMm)}^LL${dots(settings.heightMm)}`;
+export const labelZpl = (field, settings) => `^XA${mediaSetup(settings)}^MD${tone(settings)}^FO0,0${field}^FS^PQ1^XZ\n`;
 // Saves the gap-label settings in the printer; ~JC then measures the labels (it feeds one to four).
 export const saveMediaZpl = settings => `^XA${mediaSetup(settings)}^JUS^XZ\n`;
 export const CALIBRATE_ZPL = '~JC';
@@ -54,7 +56,7 @@ export const CALIBRATE_ZPL = '~JC';
 export const CANCEL_ZPL = '~JA';
 export function testZpl(settings) {
   const w = dots(settings.widthMm), h = dots(settings.heightMm);
-  return `^XA${mediaSetup(settings)}^FO8,8^GB${w - 16},${h - 16},4^FS^FO32,${Math.round(h * .22)}^A0N,44,44^FDMawaid printer test^FS^FO32,${Math.round(h * .45)}^A0N,26,26^FDOne label per sticker, frame inside the edges^FS^FO32,${Math.round(h * .62)}^A0N,26,26^FD${settings.widthMm} x ${settings.heightMm} mm^FS^PQ1^XZ\n`;
+  return `^XA${mediaSetup(settings)}^MD${tone(settings)}^FO8,8^GB${w - 16},${h - 16},4^FS^FO32,${Math.round(h * .22)}^A0N,44,44^FDMawaid printer test^FS^FO32,${Math.round(h * .45)}^A0N,26,26^FDOne label per sticker, frame inside the edges^FS^FO32,${Math.round(h * .62)}^A0N,26,26^FD${settings.widthMm} x ${settings.heightMm} mm^FS^PQ1^XZ\n`;
 }
 // Renders every PDF page at 203 dpi and returns one ZPL label per page.
 // pdfjs is the pdf.js module; its own canvas factory draws in the browser and in tests.
@@ -69,7 +71,7 @@ export async function pdfToZpl(pdfjs, bytes, settings, documentOptions = {}) {
       const { canvas, context } = pdf.canvasFactory.create(w, h);
       context.fillStyle = '#fff'; context.fillRect(0, 0, w, h);
       await page.render({ canvasContext: context, canvas, viewport, intent: 'print' }).promise;
-      zpl += labelZpl(graphicField(context.getImageData(0, 0, w, h), tone(settings)[1]), settings);
+      zpl += labelZpl(graphicField(context.getImageData(0, 0, w, h)), settings);
       pdf.canvasFactory.destroy({ canvas, context }); page.cleanup();
     }
     return zpl;
