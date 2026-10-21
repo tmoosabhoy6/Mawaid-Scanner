@@ -103,8 +103,8 @@ export async function drawLabels(doc, cards, settings, createQr) {
 }
 // Safari (takeaway) sticker: the printed Lunch/Dinner card without a QR code.
 // Left: two star-pattern arches behind a medallion holding the society logo. Right: DATE, Izan Card, Lunch/Dinner and PAX.
-// Navy and gold are dark enough that the monochrome ZD220D prints them black, with the pattern lines left white.
-const NAVY = '#22336f', BLUE = '#2c4c9c', GOLD = '#8a6d28';
+// As on the meal card, every mark is solid black (the card's navy, blue and gold would be halftoned into dots) and every
+// line, black or white, is at least 3 printer dots thick.
 const shortDate = (value, year) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'short', ...(year ? { year: 'numeric' } : {}) }).format(new Date(`${value}T00:00:00Z`));
 export function safariDates(arrival, departure) {
   if (arrival && departure) return arrival.slice(0, 4) === departure.slice(0, 4) ? `${shortDate(arrival)} – ${shortDate(departure, true)}` : `${shortDate(arrival, true)} – ${shortDate(departure, true)}`;
@@ -133,20 +133,20 @@ function starLattice(doc, cx, cy, s, box) {
 function drawPanel(doc, cx, cy, D, top, bottom) {
   const R = D / 2, aw = D * .74, gap = mm(.55);
   for (const [apex, dir] of [[top, 1], [bottom, -1]]) {
-    archPath(doc, cx, aw + gap * 2.6, apex - dir * gap * 1.3, cy); doc.lineWidth(mm(.35)).strokeColor(GOLD).stroke();
+    archPath(doc, cx, aw + gap * 2.6, apex - dir * gap * 1.3, cy); doc.lineWidth(LINE).strokeColor(INK).stroke();
     doc.save(); archPath(doc, cx, aw, apex, cy); doc.clip();
-    doc.rect(cx - aw, Math.min(apex, cy), aw * 2, Math.abs(cy - apex)).fill(NAVY);
+    doc.rect(cx - aw, Math.min(apex, cy), aw * 2, Math.abs(cy - apex)).fill(INK);
     starLattice(doc, cx, cy, aw / 4.2, { x0: cx - aw / 2, x1: cx + aw / 2, y0: Math.min(apex, cy), y1: Math.max(apex, cy) });
-    doc.lineWidth(mm(.3)).strokeColor('#fff').stroke(); doc.restore();
+    doc.lineWidth(LINE).strokeColor('#fff').stroke(); doc.restore();
   }
-  // Medallion: white disc over the arches, a gold interlaced zigzag band, then the logo.
+  // Medallion: white disc over the arches, an interlaced zigzag band, then the logo.
   doc.circle(cx, cy, R).fill('#fff');
-  doc.lineWidth(mm(.3)).strokeColor(GOLD);
+  doc.lineWidth(LINE).strokeColor(INK);
   doc.circle(cx, cy, R - mm(.2)).stroke(); doc.circle(cx, cy, R - mm(2.7)).stroke();
   const teeth = Math.max(24, Math.round(D / mm(1.05)));
   for (const shift of [0, 1]) {
     for (let i = 0; i <= teeth * 2; i++) { const a = (i / (teeth * 2)) * Math.PI * 2, d = (i + shift) % 2 ? R - mm(.75) : R - mm(2.15); doc[i ? 'lineTo' : 'moveTo'](cx + d * Math.cos(a), cy + d * Math.sin(a)); }
-    doc.lineWidth(mm(.22)).stroke();
+    doc.stroke();
   }
   const logoW = (R - mm(3.1)) * 2 * .86, logoH = logoW * LOGO.height / LOGO.width;
   doc.image(LOGO.src, cx - logoW / 2, cy - logoH / 2, { width: logoW });
@@ -155,13 +155,13 @@ function drawPanel(doc, cx, cy, D, top, bottom) {
 function sizeFor(doc, font, text, width, max) { doc.font(font).fontSize(10); return Math.min(max, 10 * width / Math.max(1, doc.widthOfString(text))); }
 // "DATE:" or "PAX:" with its value, or a rule to write on when the value is blank.
 function captioned(doc, caption, value, x, centerY, width, size) {
-  doc.font('Times-Bold').fontSize(size).fillColor(NAVY);
+  doc.font('Times-Bold').fontSize(size).fillColor(INK);
   const label = `${caption}: `, labelW = doc.widthOfString(label), top = centerY - size * .5;
   doc.text(label, x, top, { lineBreak: false });
   if (value) {
     const valueSize = Math.min(size, sizeFor(doc, 'Times-Bold', value, width - labelW, size));
-    doc.font('Times-Bold').fontSize(valueSize).fillColor('#000').text(value, x + labelW, centerY - valueSize * .5, { lineBreak: false });
-  } else doc.moveTo(x + labelW, centerY + size * .42).lineTo(x + width, centerY + size * .42).lineWidth(.6).strokeColor('#000').stroke();
+    doc.font('Times-Bold').fontSize(valueSize).text(value, x + labelW, centerY - valueSize * .5, { lineBreak: false });
+  } else doc.moveTo(x + labelW, centerY + size * .42).lineTo(x + width, centerY + size * .42).lineWidth(LINE).strokeColor(INK).stroke();
 }
 export function drawSafariLabels(doc, safaris, settings) {
   const { widthMm = 76.2, heightMm = 50.8 } = settings;
@@ -186,8 +186,8 @@ export function drawSafariLabels(doc, safaris, settings) {
     captioned(doc, 'DATE', dates, x, rows.date, width, small);
     // Every Safari sticker is headed "Izan Card", as printed on the card; the office name is not printed.
     const title = 'Izan Card', titleSize = sizeFor(doc, 'Times-Roman', title, width, mealSize * .62);
-    doc.font('Times-Roman').fontSize(titleSize).fillColor(BLUE).text(title, x, rows.name - titleSize * .5, { width, align: 'center', lineBreak: false });
-    doc.font('Times-Bold').fontSize(mealSize).fillColor(NAVY).text(meal, x, rows.meal - mealSize * .5, { width, align: 'center', lineBreak: false });
+    doc.font('Times-Roman').fontSize(titleSize).fillColor(INK).text(title, x, rows.name - titleSize * .5, { width, align: 'center', lineBreak: false });
+    doc.font('Times-Bold').fontSize(mealSize).fillColor(INK).text(meal, x, rows.meal - mealSize * .5, { width, align: 'center', lineBreak: false });
     captioned(doc, 'PAX', pax, x, rows.pax, width * .62, small * 1.15);
   }
 }
