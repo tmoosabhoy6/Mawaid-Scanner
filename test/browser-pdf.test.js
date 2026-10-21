@@ -4,7 +4,7 @@ import { readFileSync,writeFileSync,mkdirSync } from 'node:fs';
 import { JSDOM,VirtualConsole } from 'jsdom';
 import { createCanvas } from '@napi-rs/canvas';
 
-test('browser PDF bundle generates the confirmed 3 by 2 inch label without Node APIs',async()=>{
+test('browser PDF bundle generates the 3 by 2 inch QR label and Safari sticker without Node APIs',async()=>{
  const errors=[],console=new VirtualConsole();console.on('jsdomError',e=>errors.push(e));
  const dom=new JSDOM('<!doctype html><html><body></body></html>',{runScripts:'outside-only',url:'https://mawayid.test',virtualConsole:console});
  try{
@@ -16,5 +16,8 @@ test('browser PDF bundle generates the confirmed 3 by 2 inch label without Node 
  const pdf=await dom.window.generateMawaidPdf([sample],{widthMm:76.2,heightMm:50.8});
  const buffer=Buffer.from(await pdf.arrayBuffer());assert.equal(buffer.subarray(0,5).toString(),'%PDF-');assert.ok(buffer.length>1000);assert.deepEqual(errors,[]);
  if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(process.env.LABEL_TEST_OUTPUT+'/browser-label.pdf',buffer);}
+ const safari=Buffer.from(await(await dom.window.generateSafariPdf([{office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12}],{widthMm:76.2,heightMm:50.8})).arrayBuffer());
+ assert.equal(safari.subarray(0,5).toString(),'%PDF-');assert.deepEqual(errors,[]);
+ if(process.env.LABEL_TEST_OUTPUT)writeFileSync(process.env.LABEL_TEST_OUTPUT+'/browser-safari.pdf',safari);
  }finally{dom.window.close();}
 });

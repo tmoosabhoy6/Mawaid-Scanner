@@ -10,7 +10,7 @@ export const ARCHIVE_DATASETS = {
     WHERE s.date<?1 AND s.id>?2 ORDER BY s.id LIMIT ?3`,
   meals: `SELECT a.rowid AS cursor,a.date,a.meal,a.scanned_at,t.id AS tour_key,t.tour_id,t.office,p.person_no FROM admissions a JOIN people p ON p.id=a.person_id JOIN tours t ON t.id=p.tour_id
     WHERE a.date<?1 AND a.rowid>?2 ORDER BY a.rowid LIMIT ?3`,
-  tours: `SELECT t.rowid AS cursor,t.id AS tour_key,t.tour_id,t.office,t.arrival,t.departure,t.pax,t.source,t.active,t.created_at,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued
+  tours: `SELECT t.rowid AS cursor,t.id AS tour_key,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.source,t.active,t.created_at,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued
     FROM tours t WHERE ?1<>'' AND t.rowid>?2 ORDER BY t.rowid LIMIT ?3`,
   cards: `SELECT c.rowid AS cursor,t.tour_id,t.office,t.arrival,p.person_no,c.created_at,c.revoked_at,c.batch_id FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id
     WHERE ?1<>'' AND c.rowid>?2 ORDER BY c.rowid LIMIT ?3`,

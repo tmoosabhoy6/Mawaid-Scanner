@@ -1,4 +1,4 @@
-import { drawLabels } from './label-layout.js';
+import { drawLabels, drawSafariLabels } from './label-layout.js';
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
 const mm = n => n * 72 / 25.4;
@@ -12,3 +12,12 @@ export async function makeLabels(cards, settings = {}) {
   doc.end(); return complete;
 }
 // QZ Tray rasterizes this PDF, so office text cannot inject printer commands.
+// Safari stickers are normally generated in the browser; this Node version serves tests and previews.
+export async function makeSafariLabels(safaris, settings = {}) {
+  const { widthMm = 76.2, heightMm = 50.8 } = settings;
+  const doc = new PDFDocument({ size: [mm(widthMm), mm(heightMm)], margin: 0, autoFirstPage: false });
+  const chunks = []; doc.on('data', chunk => chunks.push(chunk));
+  const complete = new Promise((resolve, reject) => { doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject); });
+  drawSafariLabels(doc, safaris, settings);
+  doc.end(); return complete;
+}

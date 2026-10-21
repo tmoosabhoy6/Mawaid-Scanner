@@ -1,16 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+const TOURS = `CREATE TABLE IF NOT EXISTS tours (
+      id TEXT PRIMARY KEY, tour_id TEXT, its TEXT, office TEXT NOT NULL,
+      arrival TEXT NOT NULL, departure TEXT NOT NULL, pax INTEGER NOT NULL CHECK(pax>0),
+      source TEXT NOT NULL DEFAULT 'manual', source_key TEXT UNIQUE, created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(tour_id,arrival),
+      CHECK(arrival<=departure))`;
 export function openDatabase(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
-    CREATE TABLE IF NOT EXISTS tours (
-      id TEXT PRIMARY KEY, tour_id TEXT NOT NULL, office TEXT NOT NULL,
-      arrival TEXT NOT NULL, departure TEXT NOT NULL, pax INTEGER NOT NULL CHECK(pax>0),
-      source TEXT NOT NULL DEFAULT 'manual', source_key TEXT UNIQUE, created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
-      UNIQUE(tour_id,arrival),
-      CHECK(arrival<=departure));
+    ${TOURS};
     CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, tour_id TEXT NOT NULL REFERENCES tours(id), person_no INTEGER NOT NULL,
       UNIQUE(tour_id,person_no));
     CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, kind TEXT NOT NULL,
@@ -26,10 +27,25 @@ export function openDatabase(path) {
       card_id TEXT, tour_id TEXT, person_no INTEGER, date TEXT NOT NULL, meal TEXT,
       reason TEXT NOT NULL, scanned_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS scan_log_date ON scan_logs(date,tour_id);
+    CREATE TABLE IF NOT EXISTS safaris (id TEXT PRIMARY KEY, office TEXT, tour_id TEXT, its TEXT, arrival TEXT, departure TEXT,
+      pax INTEGER CHECK(pax IS NULL OR pax>0), created_at TEXT NOT NULL,
+      CHECK(arrival IS NULL OR departure IS NULL OR arrival<=departure));
     CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, role TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
+  upgradeTours(db);
   return db;
+}
+// Databases created before tour IDs became optional are rebuilt once, keeping every row and rowid.
+function upgradeTours(db) {
+  if (db.prepare('PRAGMA table_info(tours)').all().some(c => c.name === 'its')) return;
+  db.exec('PRAGMA foreign_keys=OFF');
+  try {
+    transaction(db, () => db.exec(`${TOURS.replace('IF NOT EXISTS tours', 'tours_upgrade')};
+      INSERT INTO tours_upgrade(rowid,id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active)
+        SELECT rowid,id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active FROM tours;
+      DROP TABLE tours; ALTER TABLE tours_upgrade RENAME TO tours;`));
+  } finally { db.exec('PRAGMA foreign_keys=ON'); }
 }
 export function transaction(db, fn) {
   db.exec('BEGIN IMMEDIATE');

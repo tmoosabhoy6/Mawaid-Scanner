@@ -34,11 +34,13 @@ npx cf d1 create --name mawayid-karbala
 
 Copy the returned database UUID into the `DB` binding in `cloudflare.config.ts`, as `bindings.d1({id:'THE_RETURNED_UUID',name:'mawayid-karbala'})`. Do not invent an ID or create another database on each deployment. The existing account's observed UUID is already recorded. Check that `mawaid-scanner` is the intended Worker before deploying to that name.
 
-Apply the migration to that exact database UUID before publishing:
+Apply the migrations to that exact database UUID before publishing:
 
 ```sh
 npx cf d1 migrations apply THE_RETURNED_UUID --dir cloudflare/migrations
 ```
+
+Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it.
 
 Prepare a private, git-ignored `.dev.vars` file. Use distinct random values for all three entries; there are no default passwords:
 

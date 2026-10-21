@@ -85,6 +85,7 @@ td small{font-size:.875rem}
 .chip{display:inline-block;padding:5px 11px;border-radius:999px;background:#202e47;font-size:.875rem;color:#c8d4e6;white-space:nowrap}
 .green-chip{background:#143a2a;color:var(--green-text)}
 .red-chip{background:#43202a;color:var(--red-text)}
+.safari-chip{background:#3a3016;color:#e8cf8f}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 .form{display:grid;gap:22px;max-width:820px}
 .actions{display:flex;gap:12px;flex-wrap:wrap}
@@ -140,10 +141,6 @@ dialog::backdrop{background:rgba(3,6,12,.7)}
 .scanner-head h1{display:flex;align-items:center;gap:12px;font-size:1.375rem;margin:0}
 .scanner-head button{white-space:nowrap;flex:none}
 .scanner-head img{width:44px;height:auto}
-.meal-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:15px 0}
-.meal-strip div{border:1px solid var(--line);padding:11px 5px;text-align:center;border-radius:8px;font-size:.875rem}
-.meal-strip .current{border-color:#49a271;background:#163c2a}
-.meal-strip span{display:block;color:var(--muted);font-size:.8125rem;margin-top:4px}
 .scan-result{border:1px solid var(--line);border-radius:14px;min-height:150px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;margin:18px 0;background:var(--panel)}
 .scan-result.green{background:#126338;border-color:#43ba7c}
 .scan-result.red{background:#8c2430;border-color:#e25b68}

@@ -1,10 +1,11 @@
-import { serviceAt, validateTour, TIME_ZONE, MEALS, START_DATE } from '../src/rules.js';
+import { serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { SUMMARY_SQL } from '../src/summary.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
 const DEFAULT_SOURCE={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:[]};
-const reasons={admitted:'Welcome — meal allowed',already_used:'This meal has already been used',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',outside_meal_time:'Meal service is closed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet'};
+const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet'};
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const json=(body,status=200,headers={})=>Response.json(body,{status,headers:{'Cache-Control':'no-store',...headers}});
 const stmt=(db,sql,...args)=>db.prepare(sql).bind(...args);
@@ -72,18 +73,28 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const cookie=(request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('mawayid_session='))?.slice(16);
   await run(db,'DELETE FROM sessions WHERE hash=?',await hash(cookie));return json({ok:true},200,{'Set-Cookie':'mawayid_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'});
  }
- if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,meals:MEALS,startDate:START_DATE});
+ if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,startDate:START_DATE});
  if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/tours'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
   return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
    (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000) x`,arrival,arrival,q,q,q));
+   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000) x`,arrival,arrival,q,q,q,q));
  }
  if(path==='/api/tours'&&method==='POST'){
-  let t;try{t=validateTour(await boundedBody(request,8192));}catch(e){throw fail(e.message);}
-  const existing=await first(db,'SELECT * FROM tours WHERE tour_id=? AND arrival=?',t.tour_id,t.arrival);if(existing)return json({...existing,existing:true});
-  const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?)',id,t.tour_id,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t},201);
+  let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
+  const existing=t.tour_id&&await first(db,'SELECT * FROM tours WHERE tour_id=? AND arrival=?',t.tour_id,t.arrival);if(existing)return json({...existing,existing:true});
+  const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',id,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t},201);
+ }
+ // Safari cards print without a QR code, so they have no people, cards or scans.
+ if(path==='/api/safaris'&&method==='GET'){
+  const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
+  return json(await all(db,`SELECT * FROM safaris WHERE (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000`,arrival,arrival,q,q,q,q));
+ }
+ if(path==='/api/safaris'&&method==='POST'){
+  let s;try{s=validateSafari(await boundedBody(request,8192));}catch(e){throw fail(e.message);}
+  const row={id:crypto.randomUUID(),...s,created_at:stamp};
+  await run(db,'INSERT INTO safaris(id,office,tour_id,its,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',...Object.values(row));return json(row,201);
  }
  const people=path.match(/^\/api\/tours\/([\w-]+)\/people$/);
  if(people&&method==='GET')return json(await all(db,'SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no',people[1]));
@@ -116,10 +127,10 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
-  return json(await all(db,`SELECT t.id,t.tour_id,t.office,t.pax,COUNT(CASE WHEN a.meal='breakfast' THEN 1 END) AS breakfast,COUNT(CASE WHEN a.meal='lunch' THEN 1 END) AS lunch,COUNT(CASE WHEN a.meal='dinner' THEN 1 END) AS dinner FROM tours t LEFT JOIN people p ON p.tour_id=t.id LEFT JOIN admissions a ON a.person_id=p.id AND a.date=? WHERE t.active=1 AND t.arrival<=? AND t.departure>=? GROUP BY t.id ORDER BY t.tour_id`,date,date,date));
+  return json(await all(db,SUMMARY_SQL,date));
  }
  if(path==='/api/settings'&&method==='GET'){
-  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),timeZone:TIME_ZONE,meals:MEALS,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
+  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }
  if(path==='/api/settings'&&method==='POST'){
   const body=await boundedBody(request,8192),statements=[];
@@ -146,14 +157,15 @@ async function scan(db,body,now){
  if(!keyValid(body.requestKey))throw fail('A scan request key is required.');
  if(typeof body.code!=='string'||body.code.length>300)throw fail('Invalid QR code.');
  const service=serviceAt(now),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
- const row=await first(db,`INSERT INTO scan_logs(request_key,card_id,person_id,tour_id,person_no,date,meal,reason,scanned_at)
- SELECT ?1,c.id,p.id,t.id,p.person_no,?2,?3,
+ // Green means a recognised card inside its stay dates; repeat scans are not limited by meal, so meal is NULL.
+ // OR IGNORE also covers databases still carrying migration 0001's per-meal admissions trigger: its insert is skipped.
+ const row=await first(db,`INSERT OR IGNORE INTO scan_logs(request_key,card_id,person_id,tour_id,person_no,date,meal,reason,scanned_at)
+ SELECT ?1,c.id,p.id,t.id,p.person_no,?2,NULL,
  CASE WHEN c.id IS NULL THEN 'unknown_card' WHEN t.active=0 THEN 'inactive_tour' WHEN c.revoked_at IS NOT NULL THEN 'replaced_card'
- WHEN ?2<t.arrival THEN 'before_arrival' WHEN ?2>t.departure THEN 'after_departure' WHEN ?3 IS NULL THEN 'outside_meal_time'
- WHEN p.person_no>t.pax THEN 'over_capacity'
- WHEN EXISTS(SELECT 1 FROM admissions a WHERE a.person_id=p.id AND a.date=?2 AND a.meal=?3) THEN 'already_used' ELSE 'admitted' END,?4
- FROM (SELECT 1) LEFT JOIN cards c ON c.token_hash=?5 LEFT JOIN people p ON p.id=c.person_id LEFT JOIN tours t ON t.id=p.tour_id WHERE 1
- ON CONFLICT(request_key) DO NOTHING RETURNING *`,body.requestKey,service.date,service.meal?.id||null,now.toISOString(),codeHash);
+ WHEN ?2<t.arrival THEN 'before_arrival' WHEN ?2>t.departure THEN 'after_departure'
+ WHEN p.person_no>t.pax THEN 'over_capacity' ELSE 'admitted' END,?3
+ FROM (SELECT 1) LEFT JOIN cards c ON c.token_hash=?4 LEFT JOIN people p ON p.id=c.person_id LEFT JOIN tours t ON t.id=p.tour_id
+ RETURNING *`,body.requestKey,service.date,now.toISOString(),codeHash);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
  const replayed=!row;
  return json({...result,replayed,status:result.reason==='admitted'&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
@@ -217,7 +229,7 @@ async function syncTours(db,body,stamp){
  const source=await getSetting(db,'source',DEFAULT_SOURCE);
  if(body.spreadsheetId!==source.spreadsheetId||body.tab!==source.tab)throw fail('Source workbook or tab does not match Settings.',409);
  if(!Array.isArray(body.tours)||body.tours.length>10000)throw fail('Invalid tours payload.');
- let tours;try{tours=body.tours.map(validateTour).filter(t=>t.departure>=START_DATE);}catch(e){throw fail(e.message);}
+ let tours;try{tours=body.tours.map(t=>validateTour(t)).filter(t=>t.departure>=START_DATE);}catch(e){throw fail(e.message);}
  const keys=tours.map(t=>`${t.tour_id}|${t.arrival}`);if(new Set(keys).size!==keys.length)throw fail('Duplicate tour stays in source.');
  const data=JSON.stringify(tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`})));
  // An unchanged snapshot does not touch any tour row. Both update statements are conditional.

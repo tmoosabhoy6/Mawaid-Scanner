@@ -6,10 +6,11 @@ The Cloudflare deployment serves **both apps from one Worker**, using D1 for sha
 
 ## Implemented rules
 
-- **Green**: active, recognised card; current date falls within arrival and departure, inclusive; current meal is open; this person has not used that meal today.
-- **Red**: unknown/replaced card, future arrival, expired departure, duplicate meal, withdrawn tour, person above updated PAX, or closed service. Network failure blocks admission.
-- Karbala time (`Asia/Baghdad`): breakfast **06:30–09:00**, lunch **12:30–15:00**, dinner **19:00–21:30**. Start is included; end is excluded. At exactly 09:00 breakfast is closed. Outside service the camera can still be started (so staff can test it and grant permission early), but cards are not checked or logged, and manual entry is disabled. Launch cutoff is **21 October 2026**; stays arriving earlier and departing on/after the cutoff are included.
-- One person has one entitlement for each meal per day. A database transaction and a unique `(person, date, meal)` key protect simultaneous scans across devices.
+- **Green**: active, recognised card, and today's Karbala date (`Asia/Baghdad`) falls within arrival and departure, inclusive.
+- **Red**: unknown/replaced card, future arrival, expired departure, withdrawn tour, or person above updated PAX. Network failure blocks admission.
+- There are no meal times: cards are checked at any hour, and a valid card is green each time it is scanned. Every scan is logged; the Daily summary counts green scans and people scanned per tour. Launch cutoff for the sheet sync is **21 October 2026**; stays arriving earlier and departing on/after the cutoff are included.
+- Tour ID and ITS are optional when adding a tour by hand. Tours without a tour ID are never merged with each other.
+- **Safari** (takeaway) cards are added in their own box under Add tour. Every field is optional (office or tour name, PAX, arrival, departure, tour ID, ITS). A Safari card prints one Lunch/Dinner sticker with the society medallion, the name, DATE (arrival – departure) and PAX, and never a QR code, both from Add tour and from the Tours page. A blank date or PAX prints as a line to write on. The tour ID and ITS are kept for searching and are not printed. Safari stickers are drawn on the printing computer, so nothing is issued or saved in Print log; print one again at any time.
 - QR tokens are independent random 256-bit values with no personal data. Token hashes and saved PDFs are retained. Cloudflare also keeps an encrypted label manifest until the printing computer saves its PDF, allowing interrupted jobs to recover. PDFs contain recoverable QR codes and require administrator access. QR codes and the calligraphy are drawn as vectors, so a label adds about 2.5 KB to its PDF.
 - **No lifetime lost-card replacement cap.** Select the original person(s), generate fresh QR codes, and revoke their previous cards. Their consumed meals remain consumed. A 50-person tour with five replacements still has 50 people. The printed person number identifies the slot whose card is being replaced.
 - Re-entering an existing tour ID and arrival date finds that stay instead of creating extra meal capacity. The same external tour ID can be used for another stay with another arrival date. “Submit & print” on an existing stay opens its replacement selection. This preserves the requested duplicate-ID workflow without turning lost cards into extra people.
@@ -28,7 +29,7 @@ Before going live:
 2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and the Karbala al-Mualla calligraphy above the guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
 3. The confirmed source mapping is **arrival = Pehli Ziyarat**, **departure = Wada Ziyarat + one calendar day**. Departure remains included in meal eligibility. Manually entered tours use the actual departure date directly; no extra day is added to manual entries.
 4. Install the separate Apps Script file and its trigger as described below. The connected Google Sheets tools can read the spreadsheet but cannot install Apps Script code or triggers.
-5. Install the Zebra driver and QZ Tray on the USB-connected printing computer; verify the connection/operating system. Run one physical print and scan it using the actual gate phone, then scan it again to verify a red result. Verify the next meal separately.
+5. Install the Zebra driver and QZ Tray on the USB-connected printing computer; verify the connection/operating system. Run one physical print and scan it using the actual gate phone to verify a green result, then scan a replaced card to verify a red result. Print one Safari sticker and check it against the printed Lunch/Dinner card.
 6. The sticker header is a vector trace of the supplied كربلاء المعلى artwork (`src/karbala-calligraphy.js`), in maroon `#741505`, followed by **FAIZ-E-HUSAINI**. Check one physical sticker: the ZD220D prints it in black.
 
 The Zebra **ZD220D is a monochrome direct-thermal printer**. The saved PDF shows the calligraphy and border in maroon; this printer's stickers are black. Ordinary browsers cannot silently command a USB printer. QZ Tray bridges the browser to the driver; without a trusted signing certificate it prompts for approval. Silent trusted printing requires QZ's signed-message setup and a private signing key kept server-side. This app currently uses QZ's explicit approval flow.
@@ -42,7 +43,7 @@ Settings → **Free hosting storage** shows database use against the 500 MB D1 l
 
 Each archive folder holds `scan-log.csv`, `meals-served.csv`, `daily-meal-summary.csv`, `tours.csv`, `cards.csv`, `print-log.csv` and `read-me.txt`. Label PDFs are never archived.
 
-Clearing removes scan records and meals served dated **before** the chosen date, and the saved label PDFs of stays that departed before it. The date can be today at the latest, so today's admissions always remain and a guest can never receive a second meal. Tours, people and cards stay, so replacements keep working; a cleared PDF shows as **PDF cleared** in Print log.
+Clearing removes scan records and meals served dated **before** the chosen date, and the saved label PDFs of stays that departed before it. The date can be today at the latest, so today's scan records always remain. Tours, people and cards stay, so replacements keep working; a cleared PDF shows as **PDF cleared** in Print log.
 
 Cloudflare counts every deleted row and index entry as a database write (100,000 per day on the free plan, reset at 03:00 Karbala time). Clearing runs in small chunks and stops for the day after 40,000 writes, so scanning keeps the rest. A very large clean-up resumes the next day. Archive again before continuing; each archive is a complete snapshot of what remains.
 
@@ -117,7 +118,7 @@ npm run build
 npm test
 ```
 
-API and client tests cover three meal windows and their exact boundaries, Karbala date rollover, invalid dates/PAX, inclusive stay dates, one admission under simultaneous scans, daily/meal resets, five replacements in a 50-person group, repeated replacements without a lifetime cap, revoked codes, preserved meal history, idempotent retries, competing print operators, source changes/removals, roles, CSRF, output escaping, filters, bulk printing and printer failure recovery.
+API and client tests cover green scans at any hour, Karbala date rollover, invalid dates/PAX, inclusive stay dates, simultaneous scans, optional tour IDs and ITS, Safari cards and their QR-free stickers, migration 0002 on a populated database, five replacements in a 50-person group, repeated replacements without a lifetime cap, revoked codes, preserved meal history, idempotent retries, competing print operators, source changes/removals, roles, CSRF, output escaping, filters, bulk printing and printer failure recovery.
 
 For the actual generated PDF QR check:
 

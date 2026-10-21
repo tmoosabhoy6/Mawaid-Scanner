@@ -49,10 +49,13 @@ test('add tour submit persists to API; text from source is escaped; settings sav
  const f=await fixture();let dom;try{
  dom=domFor(f,'/#generate');const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('#addTour'));
- for(const [key,value]of Object.entries({tour_id:'26/1',office:'<script>globalThis.bad=true</script>',arrival:'2026-10-21',departure:'2026-10-22',pax:'3'}))d.querySelector(`[name=${key}]`).value=value;
- const form=d.querySelector('#addTour');submit(w,form,d.querySelector('[value=save]'));
+ const form=d.querySelector('#addTour');
+ assert.equal(form.querySelector('[name=tour_id]').required,false);assert.equal(form.querySelector('[name=its]').required,false);
+ for(const [key,value]of Object.entries({office:'<script>globalThis.bad=true</script>',its:'30412345',arrival:'2026-10-21',departure:'2026-10-22',pax:'3'}))form.querySelector(`[name=${key}]`).value=value;
+ submit(w,form,form.querySelector('[value=save]'));
  await waitFor(()=>d.querySelectorAll('.tour-check').length===1);
  assert.ok(d.querySelector('#tourTable').textContent.includes('<script>'));assert.equal(w.bad,undefined);assert.equal(d.querySelector('#tourTable script'),null);
+ assert.match(d.querySelector('#tourTable tbody').textContent,/30412345/);assert.equal(f.db.prepare('SELECT tour_id FROM tours').get().tour_id,null);
  w.location.hash='settings';await waitFor(()=>d.querySelector('#sourceSettings'));
  d.querySelector('[name=dailyTimes]').value='06:00, 12:00';submit(w,d.querySelector('#sourceSettings'));
  await waitFor(()=>{const row=f.db.prepare("SELECT value FROM settings WHERE key='source'").get();return row&&JSON.parse(row.value).dailyTimes?.length===2;});
@@ -61,40 +64,71 @@ test('add tour submit persists to API; text from source is escaped; settings sav
  }finally{dom?.window.close();f.close();}
 });
 
-test('scanner: unused QR green, duplicate red, no yellow state and closed service disables scanning',async()=>{
+test('scanner: valid QR green on every scan at any hour, unknown red, no yellow state',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T06:00:00Z');// 9 am Karbala: once between meals.
  dom=domFor(f,'/scanner');const w=dom.window,d=w.document;
- await waitFor(()=>d.querySelector('#manualSubmit')?.disabled===false);
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ assert.equal(d.querySelector('#manualSubmit').disabled,false);assert.equal(d.querySelector('.meal-strip'),null);assert.doesNotMatch(d.body.textContent,/closed/i);
  const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode');
  input.value=`MW1:${cards[0].token}`;submit(w,form);await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
  assert.equal(d.querySelector('#scanResult strong').textContent,'ALLOW');
- await new Promise(r=>setTimeout(r,3100));input.value=`MW1:${cards[0].token}`;submit(w,form);
- await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));
- assert.match(d.querySelector('#scanResult').textContent,/already been used/);
+ await new Promise(r=>setTimeout(r,3100));d.querySelector('#scanResult').className='scan-result';input.value=`MW1:${cards[0].token}`;submit(w,form);
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
+ await new Promise(r=>setTimeout(r,1400));input.value='MW1:unknown';submit(w,form);
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));assert.match(d.querySelector('#scanResult').textContent,/not recognised/);
  assert.equal(d.querySelector('[class*=yellow]'),null);
- dom.window.close();f.setTime('2026-10-21T06:00:00Z');dom=domFor(f,'/scanner');
- await waitFor(()=>dom.window.document.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
- assert.equal(dom.window.document.querySelector('#manualSubmit').disabled,true);
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").get().n,2);
  }finally{dom?.window.close();f.close();}
 });
 
-test('scanner camera opens outside meal times but checks cards only while a meal is open',async()=>{
+test('scanner camera checks cards at any hour and toggles on and off',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T06:00:00Z');
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T20:00:00Z');// 11 pm Karbala.
  dom=new JSDOM(html,{url:'https://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window,d=w.document;let decode,stopped=0;
  w.fetch=async(url,options={})=>{const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;let req=options.method==='POST'?f.scanner.post(path):f.scanner.get(path);if(options.body)req=req.send(JSON.parse(options.body));const r=await req;return{ok:r.status<300,status:r.status,json:async()=>r.body};};
  Object.defineProperty(w,'isSecureContext',{value:true});// jsdom does not implement secure contexts.
  w.MawaidCamera=class{async start(camera,config,onDecode){decode=onDecode;}async stop(){stopped++;}clear(){}};
  w.eval(js);
- await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Meal service closed'));
- const button=d.querySelector('#startCamera');assert.equal(button.disabled,false);
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ const button=d.querySelector('#startCamera');
  button.click();await waitFor(()=>button.textContent==='Stop camera');
  decode(`MW1:${cards[0].token}`);
- await waitFor(()=>/not checked/.test(d.querySelector('#scanResult').textContent));
- await new Promise(r=>setTimeout(r,100));assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,1);
  button.click();await waitFor(()=>button.textContent==='Start camera');assert.equal(stopped,1);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('Safari: added without any required field, printed without a QR code here and from Tours',async()=>{
+ const f=await fixture();let dom;try{
+ dom=domFor(f,'/#generate');const w=dom.window,d=w.document,printed=[];
+ w.generateSafariPdf=async(safaris,settings)=>{printed.push({safaris,settings});return new w.Blob(['%PDF-test']);};
+ const append=d.head.appendChild.bind(d.head);
+ d.head.appendChild=element=>{const result=append(element);if(element.src?.endsWith('/vendor/pdf.js'))queueMicrotask(()=>element.onload());return result;};
+ await waitFor(()=>d.querySelector('#addSafari'));
+ const form=d.querySelector('#addSafari');
+ for(const [key,value]of Object.entries({office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:'12'}))form.querySelector(`[name=${key}]`).value=value;
+ submit(w,form,form.querySelector('[value=print]'));
+ await waitFor(()=>printed.length===1&&d.querySelector('.safari-check'));
+ const [card]=printed[0].safaris;assert.deepEqual([card.office,card.arrival,card.departure,card.pax],['Izan Caravan','2026-10-21','2026-10-24',12]);
+ assert.equal(printed[0].settings.widthMm,76.2);
+ // No QR printer here, so the notice explains how to retry; nothing was issued.
+ await waitFor(()=>/could not be printed/.test(d.querySelector('#notice').textContent));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n,0);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards').get().n,0);
+ const row=d.querySelector('.safari-check').closest('tr');assert.match(row.textContent,/Safari/);assert.match(row.textContent,/Izan Caravan/);assert.match(row.textContent,/No QR code/);
+ row.querySelector('.print-safari').click();await waitFor(()=>printed.length===2);assert.equal(printed[1].safaris[0].office,'Izan Caravan');
+ // Selecting a Safari card and a tour prints the sticker and the tour's QR cards.
+ await tour(f,1);d.querySelector('#tourFilters').dispatchEvent(new w.Event('submit',{cancelable:true}));
+ await waitFor(()=>d.querySelector('.tour-check'));
+ const all=d.querySelector('#allTours');all.checked=true;all.dispatchEvent(new w.Event('change'));assert.equal(d.querySelector('.safari-check').checked,false);
+ d.querySelector('.safari-check').checked=true;d.querySelector('.safari-check').dispatchEvent(new w.Event('change'));d.querySelector('#printSelected').click();
+ await waitFor(()=>printed.length===3&&f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===1);
+ // An entirely blank Safari card is allowed.
+ w.location.hash='generate';await waitFor(()=>d.querySelector('#addSafari'));
+ submit(w,d.querySelector('#addSafari'),d.querySelector('#addSafari [value=save]'));
+ await waitFor(()=>d.querySelectorAll('.safari-check').length===2);
  }finally{dom?.window.close();f.close();}
 });
 
@@ -107,7 +141,9 @@ function fakeFolder(name){
 }
 async function archiveFixture(){
  const f=await fixture();const t=await tour(f,2),{cards}=await issue(f,t.id);
- await scan(f,cards[0].token);await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
+ await scan(f,cards[0].token);
+ // A per-meal admission recorded before meal times were removed is still archived.
+ f.db.prepare("INSERT INTO admissions VALUES(?,'2026-10-21','breakfast',?,'2026-10-21T04:00:00Z')").run(cards[0].person_id,cards[0].id);await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
  return f;
 }
 async function startArchive(w,d){
@@ -131,7 +167,7 @@ test('archive & clear saves CSV folders inside Mawaid Archive, then clears only 
  assert.ok(![...archive.files.keys()].some(n=>n.endsWith('.pdf')));
  assert.match(d.querySelector('#archiveProgress').textContent,/2 scan records, 1 meals served/);
  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE date<'2026-10-22'").get().n,0);
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,1);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,0);
  // A second archive in the same minute gets its own folder.
  await waitFor(()=>!d.querySelector('#archiveClear').disabled);
  submit(w,d.querySelector('#clearForm'),d.querySelector('#archiveClear'));
