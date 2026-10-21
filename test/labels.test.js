@@ -31,8 +31,8 @@ test('meal cards and Safari stickers print only solid black, with lines at least
   assert.ok(colours.length>5);
   // Black ink, or white where the pattern lines cross the black arches.
   for(const [op,values] of colours)assert.ok(/^(0 0 0|1 1 1) /.test(op),`${where}: ${op}`);
-  // Text is outlined by one printer dot; every other line is at least 3 dots.
-  for(const [,width] of text.matchAll(/^([\d.]+) w$/gm))assert.ok(Math.abs(width-72/203)<1e-6||Number(width)>=3*72/203-1e-6,`${where}: line ${width} pt is under 3 dots`);
+  // Text is outlined by half a printer dot; every other line is at least 3 dots.
+  for(const [,width] of text.matchAll(/^([\d.]+) w$/gm))assert.ok(Math.abs(width-36/203)<1e-6||Number(width)>=3*72/203-1e-6,`${where}: line ${width} pt is under 3 dots`);
   // Thin strokes break up at 203 dpi: every font is bold and all text is filled and outlined (2 Tr).
   for(const [,font] of text.matchAll(/\/BaseFont \/(\S+)/g))assert.match(font,/-Bold$/,`${where}: ${font}`);
   const blocks=text.match(/^BT$[\s\S]*?^ET$/gm);assert.ok(blocks.length>3);

@@ -12,6 +12,9 @@ function run(char, n) {
   }
   return out;
 }
+// Five darkness steps, 3 in the middle: the printer's burn (~SD, 0–30) and how dark a grey edge pixel must be to print.
+export const TONES = { 1: [9, 100], 2: [12, 114], 3: [15, 128], 4: [18, 142], 5: [21, 156] };
+const tone = settings => TONES[settings.tone] || TONES[3];
 function compressRow(hex, previous) {
   if (hex === previous) return ':';
   const body = hex.replace(/0+$/, ''), zeros = body.length < hex.length;
@@ -21,7 +24,7 @@ function compressRow(hex, previous) {
   return zeros ? `${out},` : out;
 }
 // image: {width, height, data} RGBA pixels (canvas ImageData). Dark pixels print.
-export function graphicField(image, threshold = 160) {
+export function graphicField(image, threshold = TONES[3][1]) {
   const { width, height, data } = image, rowBytes = Math.ceil(width / 8), rows = [];
   let previous = null;
   for (let y = 0; y < height; y++) {
@@ -42,7 +45,7 @@ export function graphicField(image, threshold = 160) {
   return `^GFA,${total},${total},${rowBytes},${rows.join('')}`;
 }
 // Gap (die-cut) labels, direct thermal, tear-off, label size in dots. ^PQ1 prints one copy of each label.
-export const mediaSetup = settings => `^MNY^MTD^MMT^PON^LH0,0^PW${dots(settings.widthMm)}^LL${dots(settings.heightMm)}`;
+export const mediaSetup = settings => `~SD${tone(settings)[0]}^MNY^MTD^MMT^PON^LH0,0^PW${dots(settings.widthMm)}^LL${dots(settings.heightMm)}`;
 export const labelZpl = (field, settings) => `^XA${mediaSetup(settings)}^FO0,0${field}^FS^PQ1^XZ\n`;
 // Saves the gap-label settings in the printer; ~JC then measures the labels (it feeds one to four).
 export const saveMediaZpl = settings => `^XA${mediaSetup(settings)}^JUS^XZ\n`;
@@ -66,7 +69,7 @@ export async function pdfToZpl(pdfjs, bytes, settings, documentOptions = {}) {
       const { canvas, context } = pdf.canvasFactory.create(w, h);
       context.fillStyle = '#fff'; context.fillRect(0, 0, w, h);
       await page.render({ canvasContext: context, canvas, viewport, intent: 'print' }).promise;
-      zpl += labelZpl(graphicField(context.getImageData(0, 0, w, h)), settings);
+      zpl += labelZpl(graphicField(context.getImageData(0, 0, w, h), tone(settings)[1]), settings);
       pdf.canvasFactory.destroy({ canvas, context }); page.cleanup();
     }
     return zpl;

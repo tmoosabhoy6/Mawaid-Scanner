@@ -184,3 +184,4 @@ dialog::backdrop{background:rgba(3,6,12,.7)}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 @media print{body{background:#fff;color:#000}.sidebar,.topbar,button,.filters{display:none}.shell{display:block}main{padding:0}.panel{border:0;box-shadow:none}}
 .print-method-title{margin-top:24px}.print-method{display:grid;gap:10px;margin-bottom:16px}.print-method label{display:flex;gap:10px;align-items:center;font-weight:400}.print-method input{width:auto;min-height:0;margin:0;flex:none}
+.tone-field{max-width:320px;margin-bottom:16px}

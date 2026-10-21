@@ -5,9 +5,10 @@ const mm = n => n * 72 / 25.4;
 // meal card is solid black like the QR code. Lines are 3 printer dots thick with their edges on the dot grid.
 const INK = '#000', DOT = 72 / 203, LINE = 3 * DOT, QUIET = 4;
 const onDots = v => (Math.floor(v / DOT) + .5) * DOT;
-// Thin text strokes break up at 203 dpi, so all text is bold and outlined in black, adding a printer dot to every
-// stroke. bold(doc, font, size) sets the font and outline; pass BOLD with each text call.
-const OUTLINE = DOT, BOLD = { fill: true, stroke: true };
+// Thin text strokes break up at 203 dpi, so all text is bold and outlined in black. The outline is half a printer dot:
+// a full dot filled in the letters once stickers printed directly at 203 dpi. bold(doc, font, size) sets the font and
+// outline; pass BOLD with each text call.
+const OUTLINE = DOT / 2, BOLD = { fill: true, stroke: true };
 const bold = (doc, font, size) => doc.font(font).fontSize(size).fillColor(INK).strokeColor(INK).lineWidth(OUTLINE);
 // Convert the absolute SVG path into PDF path operators once per process.
 let artOperators;
