@@ -51,9 +51,9 @@ function fit(doc, text, width) {
   return `${text.trimEnd()}…`;
 }
 function details(doc, lines, x, y, width, size, spacing) {
-  lines.forEach(([label, value], i) => {
+  lines.forEach(([caption, value], i) => {
     bold(doc, 'Helvetica-Bold', size);
-    const caption = `${label}: `, captionWidth = doc.widthOfString(caption);
+    const captionWidth = doc.widthOfString(caption);
     doc.text(caption, x, y + i * spacing, { ...BOLD, lineBreak: false });
     doc.text(fit(doc, String(value), width - captionWidth), x + captionWidth, y + i * spacing, { ...BOLD, lineBreak: false });
   });
@@ -70,7 +70,8 @@ export async function drawLabels(doc, cards, settings, createQr) {
     doc.addPage();
     const qr = await createQr(`MW1:${c.token}`, { errorCorrectionLevel: 'M' });
     const printed = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Baghdad',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(c.printed_at)).replace(',', '');
-    const lines = [['Tour', c.tour_id || '—'], ['Office', c.office], ['Person', c.person_no], ['Arrival', c.arrival], ['Departure', c.departure]];
+    // Each line is its caption and value; the person's number prints as "PAX #1".
+    const lines = [['Tour: ', c.tour_id || '—'], ['Office: ', c.office], ['PAX #', c.person_no], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
     const inset = onDots(mm(2));
     doc.lineWidth(LINE).strokeColor(INK).rect(inset, inset, w - inset * 2, h - inset * 2).stroke();
     if (compact) {
