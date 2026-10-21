@@ -66,7 +66,7 @@ PDF generation runs on the printing computer to avoid the free Worker's 10 ms CP
 
 If PDF generation or upload is interrupted, open **Print log → Finish PDF**, then **Print PDF**. This reuses the issued QR codes. An allocation retry also reuses its request key. Do not issue replacements merely because a printer was offline. Saved PDFs cannot be overwritten by an upload retry.
 
-Install the Zebra ZD220D driver and QZ Tray on the printing computer. Confirm the actual driver queue name in Settings and the **76.2 × 50.8 mm (3 × 2 inch)** label stock. Physical alignment, QZ permission prompts and phone-camera scanning still require an on-site test.
+Install the Zebra ZD220D driver and QZ Tray on the printing computer. Confirm the actual driver queue name in Settings and the **76.2 × 50.8 mm (3 × 2 inch)** label stock. If stickers come out blank or keep feeding, use **Settings → Stop printing**, **Calibrate labels**, then **Print test sticker**. Physical alignment, QZ permission prompts and phone-camera scanning still require an on-site test.
 
 ## Tours sync
 

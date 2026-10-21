@@ -19,6 +19,7 @@
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
     "html5-qrcode": "^2.3.8",
+    "pdfjs-dist": "^5.7.284",
     "pdfkit": "^0.17.2",
     "qrcode": "^1.5.4",
     "qz-tray": "^2.2.5"
