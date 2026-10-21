@@ -253,3 +253,20 @@ test('Cloudflare: Safari sticker PDFs are saved in Print log and can be viewed a
  assert.equal((await f.call('/archive/clear',{before:'2026-10-25'})).data.deleted.pdfs,1);assert.equal((await f.call(`/batches/${saved.data.id}/pdf`)).status,410);
  }finally{await f.close();}
 });
+
+test('Cloudflare: tours list keeps finished stays; Show and Sort by apply before the 1,000-row cap',async()=>{
+ const f=await fixture();try{
+ const done=await f.tour(1,{tour_id:'26/9',arrival:'2026-10-21',departure:'2026-10-22'});
+ await f.tour(2,{tour_id:'26/10',arrival:'2026-10-25',departure:'2026-10-27'});await f.tour(1,{tour_id:'26/100',arrival:'2026-11-02',departure:'2026-11-04'});
+ await f.issue(done.id);
+ const tours=async query=>(await f.call(`/tours?${new URLSearchParams(query)}`)).data.map(t=>t.tour_id);
+ assert.deepEqual(await tours({}),['26/100','26/10','26/9']);assert.deepEqual(await tours({sort:'oldest'}),['26/9','26/10','26/100']);
+ assert.deepEqual(await tours({status:'printed'}),['26/9']);assert.deepEqual(await tours({status:'unprinted',q:'26/10'}),['26/100','26/10']);
+ assert.deepEqual(await tours({sort:"x'; DROP TABLE tours; --",status:'other'}),['26/100','26/10','26/9']);
+ const a=(await f.call('/safaris',{office:'A',arrival:'2026-10-21',departure:'2026-10-24'})).data;await f.call('/safaris',{office:'B',arrival:'2026-10-30',departure:'2026-11-01'});await f.call('/safaris',{office:'C'});
+ const saved=await f.mf.dispatchFetch(`https://mawayid.test/api/safaris/print?requestKey=${randomUUID()}&ids=${a.id}`,{method:'POST',headers:{Cookie:f.cookies.admin,'Content-Type':'application/pdf','X-Test-Time':'2026-10-21T04:00:00Z'},body:await makeSafariLabels([a],{widthMm:76.2,heightMm:50.8})});
+ assert.equal(saved.status,201);
+ const safaris=async query=>(await f.call(`/safaris?${new URLSearchParams(query)}`)).data.map(s=>s.office);
+ assert.deepEqual(await safaris({}),['B','A','C']);assert.deepEqual(await safaris({status:'printed'}),['A']);assert.deepEqual(await safaris({status:'unprinted',sort:'oldest'}),['B','C']);
+ }finally{await f.close();}
+});

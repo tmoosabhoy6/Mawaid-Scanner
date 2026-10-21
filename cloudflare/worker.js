@@ -1,6 +1,7 @@
 import { serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SUMMARY_SQL } from '../src/summary.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
+import { listOrder, tourStatus, safariStatus } from '../src/tour-list.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
@@ -76,10 +77,10 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,startDate:START_DATE});
  if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/tours'&&method==='GET'){
-  const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
+  const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase(),sort=url.searchParams.get('sort')||'',status=url.searchParams.get('status')||'';
   return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
    (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0) ORDER BY t.arrival,t.tour_id LIMIT 1000) x`,arrival,arrival,q,q,q,q));
+   FROM tours t WHERE t.active=1 AND ${tourStatus(status)} AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0) ORDER BY ${listOrder(sort,'t.')} LIMIT 1000) x ORDER BY ${listOrder(sort,'x.')}`,arrival,arrival,q,q,q,q));
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
@@ -88,10 +89,10 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  // Safari cards print without a QR code, so they have no people, cards or scans.
  if(path==='/api/safaris'&&method==='GET'){
-  const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase();
+  const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase(),sort=url.searchParams.get('sort')||'',status=url.searchParams.get('status')||'';
   return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
    (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM safaris s WHERE (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000) x`,arrival,arrival,q,q,q,q));
+   FROM safaris s WHERE ${safariStatus(status)} AND (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY ${listOrder(sort,'s.')},s.created_at LIMIT 1000) x ORDER BY ${listOrder(sort,'x.')},x.created_at`,arrival,arrival,q,q,q,q));
  }
  if(path==='/api/safaris'&&method==='POST'){
   let s;try{s=validateSafari(await boundedBody(request,8192));}catch(e){throw fail(e.message);}

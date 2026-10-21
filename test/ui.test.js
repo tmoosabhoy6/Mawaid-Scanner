@@ -199,3 +199,22 @@ test('archive downloads a zip where folders are unavailable; delete asks before 
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
  }finally{dom?.window.close();f.close();}
 });
+
+test('tours: Show and Sort by dropdowns reload the list; Safari cards sort alongside tours',async()=>{
+ const f=await fixture();let dom;try{
+ const done=await tour(f,1,{tour_id:'26/9',arrival:'2026-10-21',departure:'2026-10-22'});
+ await tour(f,2,{tour_id:'26/10',arrival:'2026-10-25',departure:'2026-10-27'});await tour(f,1,{tour_id:'26/100',arrival:'2026-11-02',departure:'2026-11-04'});
+ await f.admin.post('/api/safaris').send({tour_id:'26/50',office:'Izan Caravan',arrival:'2026-10-30',departure:'2026-11-01'}).expect(201);
+ await issue(f,done.id);
+ dom=domFor(f);const w=dom.window,d=w.document,order=()=>[...d.querySelectorAll('#tourTable tbody tr td:nth-child(2) strong')].map(s=>s.textContent).join(' ');
+ await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
+ const pick=(name,value)=>{const s=d.querySelector(`[name=${name}]`);s.value=value;s.dispatchEvent(new w.Event('change'));};
+ pick('sort','tour');await waitFor(()=>order()==='26/9 26/10 26/50 26/100');
+ pick('sort','oldest');await waitFor(()=>order()==='26/9 26/10 26/50 26/100');
+ pick('status','printed');await waitFor(()=>order()==='26/9');
+ pick('status','unprinted');await waitFor(()=>order()==='26/10 26/50 26/100');
+ d.querySelector('[name=q]').value='nothing like this';submit(w,d.querySelector('#tourFilters'));
+ await waitFor(()=>/No tours match/.test(d.querySelector('#tourTable').textContent));
+ d.querySelector('#tourFilters').reset();await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
+ }finally{dom?.window.close();f.close();}
+});

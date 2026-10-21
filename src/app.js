@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
 import { eligibility, serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
+import { listOrder, tourStatus, safariStatus } from './tour-list.js';
 import { SUMMARY_SQL } from './summary.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -70,9 +71,10 @@ export function createApp(options = {}) {
   app.get('/api/session', auth(), (req, res) => res.json({ role: req.role }));
   app.get('/api/service', auth(), (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, startDate: START_DATE }));
   app.get('/api/tours', auth('admin'), (req, res) => {
+    const sort = String(req.query.sort || ''), status = String(req.query.status || '');
     const rows = db.prepare(`SELECT x.*, (SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
       (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM tours t WHERE t.active=1 AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ? OR t.its LIKE ?) ORDER BY t.arrival,t.tour_id) x`).all(
+      FROM tours t WHERE t.active=1 AND ${tourStatus(status)} AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ? OR t.its LIKE ?)) x ORDER BY ${listOrder(sort, 'x.')}`).all(
       req.query.arrival || '', req.query.arrival || '', req.query.q || '', `%${req.query.q || ''}%`, `%${req.query.q || ''}%`, `%${req.query.q || ''}%`);
     res.json(rows);
   });
@@ -86,10 +88,10 @@ export function createApp(options = {}) {
   });
   // Safari cards print without a QR code, so they have no people, cards or scans.
   app.get('/api/safaris', auth('admin'), (req, res) => {
-    const arrival = req.query.arrival || '', q = req.query.q || '';
+    const arrival = req.query.arrival || '', q = req.query.q || '', sort = String(req.query.sort || ''), status = String(req.query.status || '');
     res.json(db.prepare(`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
       (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM safaris s WHERE (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY arrival IS NULL,arrival,created_at LIMIT 1000) x`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
+      FROM safaris s WHERE ${safariStatus(status)} AND (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY ${listOrder(sort, 's.')},s.created_at LIMIT 1000) x ORDER BY ${listOrder(sort, 'x.')},x.created_at`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
   });
   app.post('/api/safaris', auth('admin'), (req, res) => {
     let s; try { s = validateSafari(req.body); } catch (e) { throw fail(e.message); }

@@ -5,6 +5,7 @@ import request from 'supertest';
 import { fixture,tour,issue,scan,config } from './helpers.js';
 import { writeFileSync,mkdirSync,readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { makeSafariLabels } from '../src/labels.js';
 
 test('50 unique cards; a valid card is green on every scan, at any hour of its stay',async()=>{
  const f=await fixture();try{
@@ -242,5 +243,26 @@ test('Safari cards: every field optional, admin only, listed by arrival and sear
  assert.deepEqual((await f.admin.get('/api/safaris').query({q:'izan'}).expect(200)).body.map(s=>s.id),[izan.body.id]);
  assert.deepEqual((await f.admin.get('/api/tours').expect(200)).body,[]);
  await f.admin.post('/api/labels').send({tourIds:[izan.body.id],requestKey:randomUUID()}).expect(404);
+ }finally{f.close();}
+});
+
+test('tours list keeps finished stays; Show and Sort by apply to tours and Safari cards',async()=>{
+ const f=await fixture();try{
+ const done=await tour(f,1,{tour_id:'26/9',arrival:'2026-10-21',departure:'2026-10-22'});
+ await tour(f,2,{tour_id:'26/10',arrival:'2026-10-25',departure:'2026-10-27'});await tour(f,1,{tour_id:'26/100',arrival:'2026-11-02',departure:'2026-11-04'});
+ await issue(f,done.id);f.setTime('2026-11-03T04:00:00Z');
+ const tours=async query=>(await f.admin.get('/api/tours').query(query).expect(200)).body.map(t=>t.tour_id);
+ assert.deepEqual(await tours({}),['26/100','26/10','26/9'],'newest arrival first, finished stay still listed');
+ assert.deepEqual(await tours({sort:'oldest'}),['26/9','26/10','26/100']);
+ assert.deepEqual(await tours({status:'printed'}),['26/9']);assert.deepEqual(await tours({status:'unprinted',sort:'oldest'}),['26/10','26/100']);
+ assert.deepEqual(await tours({status:'unprinted',q:'26/10'}),['26/100','26/10']);assert.deepEqual(await tours({status:'printed',arrival:'2026-10-25'}),[]);
+ assert.deepEqual(await tours({sort:"x'; DROP TABLE tours; --",status:'other'}),['26/100','26/10','26/9'],'unknown choices fall back to the defaults');
+ const safari=async body=>(await f.admin.post('/api/safaris').send(body).expect(201)).body;
+ const a=await safari({office:'A',arrival:'2026-10-21',departure:'2026-10-24'});await safari({office:'B',arrival:'2026-10-30',departure:'2026-11-01'});await safari({office:'C'});
+ const pdf=await makeSafariLabels([a],{widthMm:76.2,heightMm:50.8});
+ await f.admin.post(`/api/safaris/print?requestKey=${randomUUID()}&ids=${a.id}`).set('Content-Type','application/pdf').send(pdf).expect(201);
+ const safaris=async query=>(await f.admin.get('/api/safaris').query(query).expect(200)).body.map(s=>s.office);
+ assert.deepEqual(await safaris({}),['B','A','C'],'undated Safari cards come last');assert.deepEqual(await safaris({sort:'oldest'}),['A','B','C']);
+ assert.deepEqual(await safaris({status:'printed'}),['A']);assert.deepEqual(await safaris({status:'unprinted'}),['B','C']);
  }finally{f.close();}
 });
