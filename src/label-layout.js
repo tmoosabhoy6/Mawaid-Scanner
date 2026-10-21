@@ -5,6 +5,10 @@ const mm = n => n * 72 / 25.4;
 // meal card is solid black like the QR code. Lines are 3 printer dots thick with their edges on the dot grid.
 const INK = '#000', DOT = 72 / 203, LINE = 3 * DOT, QUIET = 4;
 const onDots = v => (Math.floor(v / DOT) + .5) * DOT;
+// Thin text strokes break up at 203 dpi, so all text is bold and outlined in black, adding a printer dot to every
+// stroke. bold(doc, font, size) sets the font and outline; pass BOLD with each text call.
+const OUTLINE = DOT, BOLD = { fill: true, stroke: true };
+const bold = (doc, font, size) => doc.font(font).fontSize(size).fillColor(INK).strokeColor(INK).lineWidth(OUTLINE);
 // Convert the absolute SVG path into PDF path operators once per process.
 let artOperators;
 function artStream() {
@@ -48,17 +52,16 @@ function fit(doc, text, width) {
 }
 function details(doc, lines, x, y, width, size, spacing) {
   lines.forEach(([label, value], i) => {
-    doc.font('Helvetica').fontSize(size).fillColor(INK);
+    bold(doc, 'Helvetica-Bold', size);
     const caption = `${label}: `, captionWidth = doc.widthOfString(caption);
-    doc.text(caption, x, y + i * spacing, { lineBreak: false });
-    doc.font('Helvetica-Bold');
-    doc.text(fit(doc, String(value), width - captionWidth), x + captionWidth, y + i * spacing, { lineBreak: false });
+    doc.text(caption, x, y + i * spacing, { ...BOLD, lineBreak: false });
+    doc.text(fit(doc, String(value), width - captionWidth), x + captionWidth, y + i * spacing, { ...BOLD, lineBreak: false });
   });
 }
 // Largest size (up to max) at which a full departure line fits, so dates are never truncated.
 function detailSize(doc, width, max) {
-  doc.fontSize(10); const caption = doc.font('Helvetica').widthOfString('Departure: '), value = doc.font('Helvetica-Bold').widthOfString('0000-00-00');
-  return Math.min(max, 10 * width / (caption + value));
+  doc.font('Helvetica-Bold').fontSize(10);
+  return Math.min(max, 10 * width / doc.widthOfString('Departure: 0000-00-00'));
 }
 export async function drawLabels(doc, cards, settings, createQr) {
   const { widthMm = 76.2, heightMm = 50.8 } = settings;
@@ -76,19 +79,20 @@ export async function drawLabels(doc, cards, settings, createQr) {
       drawQr(doc, qr, mm(3), mm(qrTop), mm(qrMm));
       const x = mm(4 + qrMm), colW = w - x - mm(3.5), artW = Math.min(colW * .92, mm(30));
       let y = mm(3.6) + drawArt(doc, x + (colW - artW) / 2, mm(3.6), artW);
-      doc.font('Helvetica-Bold').fontSize(6).fillColor(INK).text('FAIZ-E-HUSAINI', x, y + mm(.9), { width: colW, align: 'center', characterSpacing: .6, lineBreak: false });
+      bold(doc, 'Helvetica-Bold', 6).text('FAIZ-E-HUSAINI', x, y + mm(.9), { ...BOLD, width: colW, align: 'center', characterSpacing: .6, lineBreak: false });
       y = onDots(y + mm(4.4));
       doc.moveTo(x + mm(2), y).lineTo(x + colW - mm(2), y).lineWidth(LINE).strokeColor(INK).stroke();
       const spacing = mm(3.85); y += mm(1.4);
       details(doc, lines, x, y, colW, detailSize(doc, colW, 7), spacing);
-      doc.font('Helvetica').fontSize(5.8).fillColor(INK).text(fit(doc, `Printed: ${printed} Karbala`, colW), x, y + lines.length * spacing + mm(.4), { lineBreak: false });
+      const stamp = `Printed: ${printed} Karbala`;
+      bold(doc, 'Helvetica-Bold', sizeFor(doc, 'Helvetica-Bold', stamp, colW * .98, 5.8)).text(fit(doc, stamp, colW), x, y + lines.length * spacing + mm(.4), { ...BOLD, lineBreak: false });
     } else {
       // Portrait labels follow the reference sticker: calligraphy, society name, QR, then details.
       const textW = w - mm(10), size = detailSize(doc, textW, 11), spacing = size * 1.45;
       const artW = Math.min(w - mm(12), w * .72);
       let y = mm(4.5) + drawArt(doc, (w - artW) / 2, mm(4.5), artW);
       const nameSize = Math.min(size, 9);
-      doc.font('Helvetica-Bold').fontSize(nameSize).fillColor(INK).text('FAIZ-E-HUSAINI', mm(4), y + mm(1.2), { width: w - mm(8), align: 'center', characterSpacing: nameSize / 10, lineBreak: false });
+      bold(doc, 'Helvetica-Bold', nameSize).text('FAIZ-E-HUSAINI', mm(4), y + mm(1.2), { ...BOLD, width: w - mm(8), align: 'center', characterSpacing: nameSize / 10, lineBreak: false });
       y += mm(2.4) + nameSize * 1.2;
       // Reserve the detail block and a bottom margin before sizing the QR, so a label never spills onto a second page.
       const room = h - mm(5) - y - (lines.length + 1) * spacing;
@@ -97,7 +101,8 @@ export async function drawLabels(doc, cards, settings, createQr) {
       drawQr(doc, qr, (w - qrSize) / 2, y, qrSize);
       y += qrSize;
       details(doc, lines, mm(5), y, textW, size, spacing);
-      doc.font('Helvetica').fontSize(size * .75).fillColor(INK).text(fit(doc, `Printed: ${printed} Karbala`, textW), mm(5), y + lines.length * spacing + size * .2, { lineBreak: false });
+      const stamp = `Printed: ${printed} Karbala`;
+      bold(doc, 'Helvetica-Bold', sizeFor(doc, 'Helvetica-Bold', stamp, textW * .98, size * .75)).text(fit(doc, stamp, textW), mm(5), y + lines.length * spacing + size * .2, { ...BOLD, lineBreak: false });
     }
   }
 }
@@ -155,12 +160,12 @@ function drawPanel(doc, cx, cy, D, top, bottom) {
 function sizeFor(doc, font, text, width, max) { doc.font(font).fontSize(10); return Math.min(max, 10 * width / Math.max(1, doc.widthOfString(text))); }
 // "DATE:" or "PAX:" with its value, or a rule to write on when the value is blank.
 function captioned(doc, caption, value, x, centerY, width, size) {
-  doc.font('Times-Bold').fontSize(size).fillColor(INK);
+  bold(doc, 'Times-Bold', size);
   const label = `${caption}: `, labelW = doc.widthOfString(label), top = centerY - size * .5;
-  doc.text(label, x, top, { lineBreak: false });
+  doc.text(label, x, top, { ...BOLD, lineBreak: false });
   if (value) {
     const valueSize = Math.min(size, sizeFor(doc, 'Times-Bold', value, width - labelW, size));
-    doc.font('Times-Bold').fontSize(valueSize).text(value, x + labelW, centerY - valueSize * .5, { lineBreak: false });
+    bold(doc, 'Times-Bold', valueSize).text(value, x + labelW, centerY - valueSize * .5, { ...BOLD, lineBreak: false });
   } else doc.moveTo(x + labelW, centerY + size * .42).lineTo(x + width, centerY + size * .42).lineWidth(LINE).strokeColor(INK).stroke();
 }
 export function drawSafariLabels(doc, safaris, settings) {
@@ -185,9 +190,9 @@ export function drawSafariLabels(doc, safaris, settings) {
     const meal = 'Lunch/Dinner', mealSize = sizeFor(doc, 'Times-Bold', meal, width, mm(8.5)), small = Math.min(mealSize * .46, 11);
     captioned(doc, 'DATE', dates, x, rows.date, width, small);
     // Every Safari sticker is headed "Izan Card", as printed on the card; the office name is not printed.
-    const title = 'Izan Card', titleSize = sizeFor(doc, 'Times-Roman', title, width, mealSize * .62);
-    doc.font('Times-Roman').fontSize(titleSize).fillColor(INK).text(title, x, rows.name - titleSize * .5, { width, align: 'center', lineBreak: false });
-    doc.font('Times-Bold').fontSize(mealSize).fillColor(INK).text(meal, x, rows.meal - mealSize * .5, { width, align: 'center', lineBreak: false });
+    const title = 'Izan Card', titleSize = sizeFor(doc, 'Times-Bold', title, width, mealSize * .62);
+    bold(doc, 'Times-Bold', titleSize).text(title, x, rows.name - titleSize * .5, { ...BOLD, width, align: 'center', lineBreak: false });
+    bold(doc, 'Times-Bold', mealSize).text(meal, x, rows.meal - mealSize * .5, { ...BOLD, width, align: 'center', lineBreak: false });
     captioned(doc, 'PAX', pax, x, rows.pax, width * .62, small * 1.15);
   }
 }

@@ -24,14 +24,19 @@ async function uncompressed(draw,widthMm,heightMm){
  const doc=new PDFDocument({size:[widthMm*72/25.4,heightMm*72/25.4],compress:false,autoFirstPage:false}),chunks=[];doc.on('data',c=>chunks.push(c));
  const done=new Promise(r=>doc.on('end',r));await draw(doc,{widthMm,heightMm});doc.end();await done;return Buffer.concat(chunks).toString('latin1');
 }
-test('meal cards and Safari stickers print only solid black, with lines at least 3 printer dots thick',async()=>{
+test('meal cards and Safari stickers print only solid black, with lines at least 3 printer dots thick and bold, outlined text',async()=>{
  const kinds={'meal card':(doc,size)=>drawLabels(doc,[sample],size,(t,o)=>QRCode.create(t,o)),'Safari sticker':(doc,size)=>drawSafariLabels(doc,[{arrival:'2026-10-21',departure:'2026-10-24',pax:12},{}],size)};
  for(const [kind,draw] of Object.entries(kinds))for(const [widthMm,heightMm] of [[76.2,50.8],[104,200]]){
   const text=await uncompressed(draw,widthMm,heightMm),where=`${kind} ${widthMm} × ${heightMm} mm`,colours=[...text.matchAll(/^([\d. ]+) (scn|SCN|sc|SC|rg|RG|g|G|k|K)$/gm)];
   assert.ok(colours.length>5);
   // Black ink, or white where the pattern lines cross the black arches.
   for(const [op,values] of colours)assert.ok(/^(0 0 0|1 1 1) /.test(op),`${where}: ${op}`);
-  for(const [,width] of text.matchAll(/^([\d.]+) w$/gm))assert.ok(Number(width)>=3*72/203-1e-6,`${where}: line ${width} pt is under 3 dots`);
+  // Text is outlined by one printer dot; every other line is at least 3 dots.
+  for(const [,width] of text.matchAll(/^([\d.]+) w$/gm))assert.ok(Math.abs(width-72/203)<1e-6||Number(width)>=3*72/203-1e-6,`${where}: line ${width} pt is under 3 dots`);
+  // Thin strokes break up at 203 dpi: every font is bold and all text is filled and outlined (2 Tr).
+  for(const [,font] of text.matchAll(/\/BaseFont \/(\S+)/g))assert.match(font,/-Bold$/,`${where}: ${font}`);
+  const blocks=text.match(/^BT$[\s\S]*?^ET$/gm);assert.ok(blocks.length>3);
+  for(const block of blocks)assert.match(block,/^2 Tr$/m,`${where}: text is not outlined`);
  }
  const logo=await loadImage(Buffer.from(FAIZ_LOGO.src.split(',')[1],'base64')),canvas=createCanvas(logo.width,logo.height),context=canvas.getContext('2d');
  context.drawImage(logo,0,0);const pixels=context.getImageData(0,0,logo.width,logo.height).data;

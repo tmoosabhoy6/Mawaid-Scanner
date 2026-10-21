@@ -23,11 +23,19 @@ function domFor(f,path='/'){
  w.eval(js);return dom;
 }
 function submit(w,form,button){form.dispatchEvent(new w.SubmitEvent('submit',{bubbles:true,cancelable:true,submitter:button}));}
+const karbalaToday=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad'}).format(new Date());
+// The Tours page opens on today's arrivals; once its first load has finished, clear the date to list every tour.
+async function allDates(w,d){
+ await waitFor(()=>d.querySelector('#tourCount')&&d.querySelector('#tourCount').textContent!=='Loading…');
+ assert.equal(d.querySelector('[name=arrival]').value,karbalaToday());
+ d.querySelector('[name=arrival]').value='';submit(w,d.querySelector('#tourFilters'));
+}
 
 test('tours: arrival filter, select all, print job saved despite printer unavailable, replacement selection',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,2),future=await tour(f,1,{arrival:'2026-11-01',departure:'2026-11-02'});
  dom=domFor(f);const w=dom.window,d=w.document;
+ await allDates(w,d);
  await waitFor(()=>d.querySelectorAll('.tour-check').length===2);
  d.querySelector('[name=arrival]').value='2026-10-21';submit(w,d.querySelector('#tourFilters'));
  await waitFor(()=>d.querySelectorAll('.tour-check').length===1);
@@ -112,7 +120,7 @@ test('Safari: added without any required field, saved in Print log and printed w
  const form=d.querySelector('#addSafari');
  for(const [key,value]of Object.entries({office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:'12'}))form.querySelector(`[name=${key}]`).value=value;
  submit(w,form,form.querySelector('[value=print]'));
- await waitFor(()=>printed.length===1&&d.querySelector('.safari-check'));
+ await waitFor(()=>printed.length===1);await allDates(w,d);await waitFor(()=>d.querySelector('.safari-check'));
  const [card]=printed[0].safaris;assert.deepEqual([card.office,card.arrival,card.departure,card.pax],['Izan Caravan','2026-10-21','2026-10-24',12]);
  assert.equal(printed[0].settings.widthMm,76.2);
  // No QR Tray here: the PDF is still saved in Print log, no QR cards are issued, and the notice says what to do.
@@ -133,6 +141,7 @@ test('Safari: added without any required field, saved in Print log and printed w
  // An entirely blank Safari card is allowed.
  w.location.hash='generate';await waitFor(()=>d.querySelector('#addSafari'));
  submit(w,d.querySelector('#addSafari'),d.querySelector('#addSafari [value=save]'));
+ await waitFor(()=>d.querySelector('#tourFilters'));await allDates(w,d);
  await waitFor(()=>d.querySelectorAll('.safari-check').length===2);
  }finally{dom?.window.close();f.close();}
 });
@@ -207,6 +216,7 @@ test('tours: Show and Sort by dropdowns reload the list; Safari cards sort along
  await f.admin.post('/api/safaris').send({tour_id:'26/50',office:'Izan Caravan',arrival:'2026-10-30',departure:'2026-11-01'}).expect(201);
  await issue(f,done.id);
  dom=domFor(f);const w=dom.window,d=w.document,order=()=>[...d.querySelectorAll('#tourTable tbody tr td:nth-child(2) strong')].map(s=>s.textContent).join(' ');
+ await allDates(w,d);
  await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
  const pick=(name,value)=>{const s=d.querySelector(`[name=${name}]`);s.value=value;s.dispatchEvent(new w.Event('change'));};
  pick('sort','tour');await waitFor(()=>order()==='26/9 26/10 26/50 26/100');
@@ -215,6 +225,9 @@ test('tours: Show and Sort by dropdowns reload the list; Safari cards sort along
  pick('status','unprinted');await waitFor(()=>order()==='26/10 26/50 26/100');
  d.querySelector('[name=q]').value='nothing like this';submit(w,d.querySelector('#tourFilters'));
  await waitFor(()=>/No tours match/.test(d.querySelector('#tourTable').textContent));
- d.querySelector('#tourFilters').reset();await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
+ // Reset returns to the defaults: today's arrivals, newest first.
+ d.querySelector('#tourFilters').reset();
+ assert.equal(d.querySelector('[name=arrival]').value,karbalaToday());assert.equal(d.querySelector('[name=sort]').value,'newest');
+ await allDates(w,d);await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
  }finally{dom?.window.close();f.close();}
 });
