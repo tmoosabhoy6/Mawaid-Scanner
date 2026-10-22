@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { makeLabels,makeSafariLabels } from '../src/labels.js';
 import { JSDOM } from 'jsdom';
-const config={ADMIN_PASSWORD:'worker-admin-password-12345',SCANNER_PASSWORD:'worker-scanner-password-6789',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
+import { hash } from '../cloudflare/crypto.js';
+const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
 const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql'];
@@ -26,20 +27,26 @@ async function fixture(overrides={},migrations=MIGRATIONS){
   const data=res.headers.get('Content-Type')?.includes('application/json')?await res.json():new Uint8Array(await res.arrayBuffer());
   return{status:res.status,data,res};
  };
- for(const role of ['admin','scanner'])assert.equal((await call('/login',{role,password:role==='admin'?credentials.ADMIN_PASSWORD:credentials.SCANNER_PASSWORD},role)).status,200);
+ // Only the administrator signs in; calls made as 'scanner' carry no session.
+ assert.equal((await call('/login',{password:credentials.ADMIN_PASSWORD})).status,200);
  const tour=async(pax=2,extra={})=>{const r=await call('/tours',{tour_id:'26/1',office:'Test office',arrival:'2026-10-21',departure:'2026-10-24',pax,...extra});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const issue=async(id,key=randomUUID())=>{const r=await call('/labels',{tourIds:[id],requestKey:key});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const scan=(token,key=randomUUID())=>call('/scan',{code:'MW1:'+token,requestKey:key},'scanner');
  return{mf,db,call,tour,issue,scan,cookies,setTime(value){now=value;},close:()=>mf.dispose()};
 }
 
-test('Cloudflare: configured short passwords work only for their assigned role',async()=>{
- const f=await fixture({SCANNER_PASSWORD:'S1',ADMIN_PASSWORD:'A1234'});try{
+test('Cloudflare: only the administrator signs in; the scanner works without a session',async()=>{
+ const f=await fixture({ADMIN_PASSWORD:'A1234',SCANNER_PASSWORD:'S1'});try{
  assert.equal((await f.call('/session')).data.role,'admin');
- assert.equal((await f.call('/session',undefined,'scanner')).data.role,'scanner');
- assert.equal((await f.call('/login',{role:'admin',password:'S1'},'none')).status,401);
- assert.equal((await f.call('/login',{role:'scanner',password:'A1234'},'none')).status,401);
- assert.equal((await f.call('/login',{role:'admin',password:''},'none')).status,401);
+ assert.equal((await f.call('/session',undefined,'scanner')).status,401);
+ assert.equal((await f.call('/login',{password:'S1'},'none')).status,401);
+ assert.equal((await f.call('/login',{role:'scanner',password:'S1'},'none')).status,401);
+ assert.equal((await f.call('/login',{password:''},'none')).status,401);
+ // A session left from the old Scanner sign-in no longer opens anything that needs one.
+ await f.db.prepare("INSERT INTO sessions VALUES(?,'scanner',?)").bind(await hash('old-scanner-token'),Date.now()+60000).run();
+ assert.equal((await f.call('/session',undefined,'old',{headers:{Cookie:'mawayid_session=old-scanner-token'}})).status,401);
+ assert.equal((await f.call('/service',undefined,'scanner')).status,200);
+ assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner')).data.status,'red');
  }finally{await f.close();}
 });
 
@@ -92,7 +99,7 @@ test('Cloudflare: unfinished PDFs recover after restart; immutable PDFs are save
  const saved=await f.call(`/batches/${b.id}/pdf`);assert.equal(saved.status,200);assert.deepEqual(saved.data,new Uint8Array(pdf));
  assert.equal((await f.call(`/batches/${b.id}/manifest`)).data.requiresPdfUpload,false);
  assert.equal((await f.db.prepare('SELECT envelope FROM batches WHERE id=?').bind(b.id).first()).envelope,null);
- assert.equal((await f.call(`/batches/${b.id}/pdf`,undefined,'scanner')).status,403);
+ assert.equal((await f.call(`/batches/${b.id}/pdf`,undefined,'scanner')).status,401);
  }finally{await f.close();}
 });
 
@@ -112,7 +119,7 @@ test('Cloudflare: stay dates, roles and CSRF block admission; any hour of a stay
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);
  for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
- assert.equal((await f.call('/tours',undefined,'scanner')).status,403);
+ assert.equal((await f.call('/tours',undefined,'scanner')).status,401);
  assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner',{headers:{Origin:'https://other.test'}})).status,403);
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
  }finally{await f.close();}
@@ -129,7 +136,7 @@ test('Cloudflare: archive pages records, clears in bounded chunks and respects t
  f.setTime('2026-10-22T04:00:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
  const status=await f.call('/archive?before=2026-10-22');assert.equal(status.status,200);
  assert.deepEqual(status.data.counts,{scans:2,meals:1,pdfs:0});assert.equal(status.data.cleanup.limit,40000);assert.equal(status.data.cleanup.used,0);
- assert.equal((await f.call('/archive?before=2026-10-23')).status,400);assert.equal((await f.call('/archive/clear',{before:''})).status,400);assert.equal((await f.call('/archive/clear',{})).status,400);assert.equal((await f.call('/archive',undefined,'scanner')).status,403);
+ assert.equal((await f.call('/archive?before=2026-10-23')).status,400);assert.equal((await f.call('/archive/clear',{before:''})).status,400);assert.equal((await f.call('/archive/clear',{})).status,400);assert.equal((await f.call('/archive',undefined,'scanner')).status,401);
  const page=await f.call('/archive/scans?before=2026-10-22&limit=1');assert.equal(page.data.rows.length,1);assert.ok(page.data.next);
  assert.equal((await f.call(`/archive/scans?before=2026-10-22&after=${page.data.next}`)).data.rows.length,1);
  assert.equal((await f.call('/archive/meals?before=2026-10-22')).data.rows.length,1);
@@ -202,7 +209,7 @@ test('Cloudflare: optional tour ID and ITS; Safari cards are stored without QR c
  const safari=await f.call('/safaris',{office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12});assert.equal(safari.status,201);
  assert.equal((await f.call('/safaris',{})).status,201);assert.equal((await f.call('/safaris',{pax:-1})).status,400);
  assert.deepEqual((await f.call('/safaris?q=izan')).data.map(s=>s.id),[safari.data.id]);assert.equal((await f.call('/safaris')).data.length,2);
- assert.equal((await f.call('/safaris',undefined,'scanner')).status,403);
+ assert.equal((await f.call('/safaris',undefined,'scanner')).status,401);
  assert.equal((await f.call('/labels',{tourIds:[safari.data.id],requestKey:randomUUID()})).status,404);
  }finally{await f.close();}
 });

@@ -6,12 +6,13 @@ import { readFileSync } from 'node:fs';
 import { fixture,tour,issue,scan } from './helpers.js';
 const html=readFileSync('public/index.html','utf8'),js=readFileSync('public/app.js','utf8');
 async function waitFor(fn){for(let n=0;n<200;n++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw new Error('UI condition timed out');}
-function domFor(f,path='/'){
+// signedIn:false sends every request without a session, as a gate phone does.
+function domFor(f,path='/',{signedIn=true}={}){
  const dom=new JSDOM(html,{url:'http://localhost:3000'+path,runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window;
  w.fetch=async(url,options={})=>{
   const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;
-  const agent=path.startsWith('/api/scan')||path==='/api/service'?f.scanner:f.admin;
+  const agent=!signedIn||path.startsWith('/api/scan')||path==='/api/service'?f.scanner:f.admin;
   let req=options.method==='POST'?agent.post(path):agent.get(path);
   if(options.headers?.['Content-Type']==='application/pdf')req=req.set('Content-Type','application/pdf').send(Buffer.from(await options.body.arrayBuffer()));
   else if(options.body)req=req.send(JSON.parse(options.body));
@@ -73,11 +74,19 @@ test('add tour submit persists to API; text from source is escaped; settings sav
  }finally{dom?.window.close();f.close();}
 });
 
+test('signed out, / asks for the administrator password only',async()=>{
+ const f=await fixture();let dom;try{
+ dom=domFor(f,'/',{signedIn:false});const d=dom.window.document;
+ await waitFor(()=>d.querySelector('#loginForm'));
+ assert.equal(d.querySelector('#loginForm select'),null);assert.match(d.querySelector('#loginForm').textContent,/Administrator password/);
+ }finally{dom?.window.close();f.close();}
+});
 test('scanner: valid QR green on every scan at any hour, unknown red, no yellow state',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T06:00:00Z');// 9 am Karbala: once between meals.
- dom=domFor(f,'/scanner');const w=dom.window,d=w.document;
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ assert.equal(d.querySelector('#loginForm'),null);assert.doesNotMatch(d.body.textContent,/Sign (in|out)|Back to printing system/);
  assert.equal(d.querySelector('#manualSubmit').disabled,false);assert.equal(d.querySelector('.meal-strip'),null);assert.doesNotMatch(d.body.textContent,/closed/i);
  const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode');
  input.value=`MW1:${cards[0].token}`;submit(w,form);await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));

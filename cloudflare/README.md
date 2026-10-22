@@ -42,11 +42,10 @@ npx cf d1 migrations apply THE_RETURNED_UUID --dir cloudflare/migrations
 
 Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it. `0003_safari_print_log.sql` only adds a table, so Safari sticker jobs appear in Print log.
 
-Prepare a private, git-ignored `.dev.vars` file. Use distinct random values for all three entries; there are no default passwords:
+Prepare a private, git-ignored `.dev.vars` file. Use distinct random values for both entries; there is no default password:
 
 ```dotenv
 ADMIN_PASSWORD=YOUR_RANDOM_ADMIN_PASSWORD_AT_LEAST_12_CHARACTERS
-SCANNER_PASSWORD=YOUR_DIFFERENT_RANDOM_SCANNER_PASSWORD_AT_LEAST_12_CHARACTERS
 SYNC_TOKEN=YOUR_SEPARATE_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS
 ```
 
@@ -58,7 +57,7 @@ npx cf deploy --mode production --dry-run --prebuilt
 npx cf deploy --mode production --prebuilt --secrets-file .dev.vars
 ```
 
-Use the actual `workers.dev` URL returned by deployment. Check `/api/health`, then sign in at `/` with the admin password and `/scanner` with the scanner password. Do not publish test passwords or send credentials to GitHub. Keep the account on the free plan unless you deliberately choose to upgrade.
+Use the actual `workers.dev` URL returned by deployment. Check `/api/health`, then sign in at `/` with the admin password. `/scanner` opens without a password. Do not publish test passwords or send credentials to GitHub. Keep the account on the free plan unless you deliberately choose to upgrade.
 
 ## Printing and recovery
 

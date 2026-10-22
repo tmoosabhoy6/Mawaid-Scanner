@@ -17,10 +17,9 @@ const fail = (message, status = 400) => Object.assign(new Error(message), { stat
 const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour: 'Tour is no longer active in the source sheet' };
 export function createApp(options = {}) {
   const config = { origin: process.env.APP_ORIGIN || 'http://localhost:3000',
-    adminPassword: process.env.ADMIN_PASSWORD || '', scannerPassword: process.env.SCANNER_PASSWORD || '',
+    adminPassword: process.env.ADMIN_PASSWORD || '',
     syncToken: process.env.SYNC_TOKEN || '', dataDir: resolve(process.env.DATA_DIR || '.data'), ...options };
-  if (!config.adminPassword || !config.scannerPassword || config.syncToken.length < 32) throw new Error('Set ADMIN_PASSWORD and SCANNER_PASSWORD and SYNC_TOKEN (32+ characters).');
-  if (equal(config.adminPassword, config.scannerPassword)) throw new Error('Use different admin and scanner passwords.');
+  if (!config.adminPassword || config.syncToken.length < 32) throw new Error('Set ADMIN_PASSWORD and SYNC_TOKEN (32+ characters).');
   const origin = new URL(config.origin);
   if (origin.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(origin.hostname)) throw new Error('APP_ORIGIN must use HTTPS outside localhost.');
   const db = options.db || openDatabase(join(config.dataDir, 'mawayid.sqlite'));
@@ -44,33 +43,32 @@ export function createApp(options = {}) {
   const setSetting = (key, value) => db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value));
   const printer = () => getSetting('printer', { widthMm: 76.2, heightMm: 50.8, name: 'ZDesigner ZD220-203dpi ZPL', confirmed: true });
   const source = () => getSetting('source', { spreadsheetId: '12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE', tab: 'Tours', dailyTimes: [] });
-  const auth = (role) => (req, res, next) => {
+  // Only the administrator signs in. The scanner needs no session; older scanner sessions no longer count.
+  const auth = (req, res, next) => {
     const raw = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('mawayid_session='))?.slice(16);
-    const session = raw && db.prepare('SELECT role FROM sessions WHERE hash=? AND expires>?').get(hash(raw), Date.now());
+    const session = raw && db.prepare("SELECT role FROM sessions WHERE hash=? AND expires>? AND role='admin'").get(hash(raw), Date.now());
     if (!session) return res.status(401).json({ error: 'Please sign in.' });
-    if (role === 'admin' && session.role !== 'admin') return res.status(403).json({ error: 'Admin access is required.' });
-    req.role = session.role; next();
+    next();
   };
   const loginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
   const salt = randomBytes(16);
-  const passwordHashes = { admin: scryptSync(config.adminPassword, salt, 32), scanner: scryptSync(config.scannerPassword, salt, 32) };
+  const adminHash = scryptSync(config.adminPassword, salt, 32);
   app.get('/api/health', (req, res) => { db.prepare('SELECT 1').get(); res.json({ status: 'ok' }); });
   app.post('/api/login', loginLimit, (req, res) => {
-    const role = req.body.role === 'scanner' ? 'scanner' : 'admin';
-    if (typeof req.body.password !== 'string' || req.body.password.length > 256 || !timingSafeEqual(scryptSync(req.body.password, salt, 32), passwordHashes[role])) return res.status(401).json({ error: 'Incorrect password.' });
+    if (typeof req.body.password !== 'string' || req.body.password.length > 256 || !timingSafeEqual(scryptSync(req.body.password, salt, 32), adminHash)) return res.status(401).json({ error: 'Incorrect password.' });
     const session = token(); db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
-    db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(hash(session), role, Date.now() + 12 * 60 * 60 * 1000);
+    db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(hash(session), 'admin', Date.now() + 12 * 60 * 60 * 1000);
     res.cookie('mawayid_session', session, { httpOnly: true, secure: origin.protocol === 'https:', sameSite: 'strict', maxAge: 12 * 60 * 60 * 1000, path: '/' });
-    res.json({ role });
+    res.json({ role: 'admin' });
   });
-  app.post('/api/logout', auth(), (req, res) => {
+  app.post('/api/logout', auth, (req, res) => {
     const raw = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('mawayid_session='))?.slice(16);
     if (raw) db.prepare('DELETE FROM sessions WHERE hash=?').run(hash(raw));
     res.clearCookie('mawayid_session', { path: '/' }); res.json({ ok: true });
   });
-  app.get('/api/session', auth(), (req, res) => res.json({ role: req.role }));
-  app.get('/api/service', auth(), (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, startDate: START_DATE }));
-  app.get('/api/tours', auth('admin'), (req, res) => {
+  app.get('/api/session', auth, (req, res) => res.json({ role: 'admin' }));
+  app.get('/api/service', (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, startDate: START_DATE }));
+  app.get('/api/tours', auth, (req, res) => {
     const sort = String(req.query.sort || ''), status = String(req.query.status || '');
     const rows = db.prepare(`SELECT x.*, (SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
       (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
@@ -78,7 +76,7 @@ export function createApp(options = {}) {
       req.query.arrival || '', req.query.arrival || '', req.query.q || '', `%${req.query.q || ''}%`, `%${req.query.q || ''}%`, `%${req.query.q || ''}%`);
     res.json(rows);
   });
-  app.post('/api/tours', auth('admin'), (req, res) => {
+  app.post('/api/tours', auth, (req, res) => {
     let t; try { t = validateTour(req.body, { requireId: false }); } catch (e) { throw fail(e.message); }
     // Reusing a tour ID for the same stay returns the existing entitlement instead of adding seats.
     const existing = t.tour_id && db.prepare('SELECT * FROM tours WHERE tour_id=? AND arrival=?').get(t.tour_id, t.arrival);
@@ -87,20 +85,20 @@ export function createApp(options = {}) {
     res.status(201).json({ id, ...t });
   });
   // Safari cards print without a QR code, so they have no people, cards or scans.
-  app.get('/api/safaris', auth('admin'), (req, res) => {
+  app.get('/api/safaris', auth, (req, res) => {
     const arrival = req.query.arrival || '', q = req.query.q || '', sort = String(req.query.sort || ''), status = String(req.query.status || '');
     res.json(db.prepare(`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
       (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
       FROM safaris s WHERE ${safariStatus(status)} AND (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY ${listOrder(sort, 's.')},s.created_at LIMIT 1000) x ORDER BY ${listOrder(sort, 'x.')},x.created_at`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
   });
-  app.post('/api/safaris', auth('admin'), (req, res) => {
+  app.post('/api/safaris', auth, (req, res) => {
     let s; try { s = validateSafari(req.body); } catch (e) { throw fail(e.message); }
     const row = { id: uid(), ...s, created_at: now().toISOString() };
     db.prepare('INSERT INTO safaris(id,office,tour_id,its,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)').run(...Object.values(row));
     res.status(201).json(row);
   });
   // The printing computer draws Safari stickers and saves the PDF here before printing, so the job appears in Print log.
-  app.post('/api/safaris/print', auth('admin'), express.raw({ type: 'application/pdf', limit: '3mb' }), (req, res) => {
+  app.post('/api/safaris/print', auth, express.raw({ type: 'application/pdf', limit: '3mb' }), (req, res) => {
     const key = req.query.requestKey, ids = [...new Set(String(req.query.ids || '').split(',').filter(Boolean))];
     if (typeof key !== 'string' || !/^[\w-]{16,100}$/.test(key)) throw fail('A valid request key is required.');
     if (!ids.length || ids.length > 100 || ids.some(id => !/^[\w-]{1,100}$/.test(id))) throw fail('Select up to 100 Safari cards per print job.');
@@ -115,8 +113,8 @@ export function createApp(options = {}) {
     });
     res.status(201).json({ id, count: ids.length });
   });
-  app.get('/api/tours/:id/people', auth('admin'), (req, res) => res.json(db.prepare(`SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no`).all(req.params.id)));
-  app.post('/api/labels', auth('admin'), async (req, res) => {
+  app.get('/api/tours/:id/people', auth, (req, res) => res.json(db.prepare(`SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no`).all(req.params.id)));
+  app.post('/api/labels', auth, async (req, res) => {
     if (typeof req.body.requestKey !== 'string' || !/^[\w-]{16,100}$/.test(req.body.requestKey)) throw fail('A valid request key is required.');
     const prior = db.prepare('SELECT id FROM batches WHERE request_key=?').get(req.body.requestKey);
     if (prior) return res.json({ id: prior.id, existing: true });
@@ -169,18 +167,18 @@ export function createApp(options = {}) {
     });
     res.status(201).json(result);
   });
-  app.get('/api/batches', auth('admin'), (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
-  app.get('/api/batches/:id/pdf', auth('admin'), (req, res) => {
+  app.get('/api/batches', auth, (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
+  app.get('/api/batches/:id/pdf', auth, (req, res) => {
     const batch = db.prepare('SELECT pdf,printer_status FROM batches WHERE id=?').get(req.params.id);
     if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.', 410);
     if (!batch?.pdf) throw fail('PDF not found.', 404);
     res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="mawaid-${req.params.id}.pdf"` }).send(Buffer.from(batch.pdf));
   });
-  app.post('/api/batches/:id/status', auth('admin'), (req, res) => {
+  app.post('/api/batches/:id/status', auth, (req, res) => {
     if (!['sent_to_printer','printer_error'].includes(req.body.status)) throw fail('Invalid printer status.');
     db.prepare('UPDATE batches SET printer_status=? WHERE id=? AND pdf IS NOT NULL').run(req.body.status, req.params.id); res.json({ ok: true });
   });
-  app.post('/api/scan', auth(), (req, res) => {
+  app.post('/api/scan', (req, res) => {
     const { requestKey, code } = req.body;
     if (typeof requestKey !== 'string' || !/^[\w-]{16,100}$/.test(requestKey)) throw fail('A scan request key is required.');
     if (typeof code !== 'string' || code.length > 300) throw fail('Invalid QR code.');
@@ -199,35 +197,35 @@ export function createApp(options = {}) {
     // A network replay can acknowledge a prior admission but must not show a fresh green gate.
     res.json({ ...result, status: result.reason === 'admitted' && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
   });
-  app.get('/api/logs', auth('admin'), (req, res) => {
+  app.get('/api/logs', auth, (req, res) => {
     const { date = '', tour = '', status = '', office = '' } = req.query;
     res.json(db.prepare(`SELECT s.*,t.tour_id AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
       WHERE (?='' OR s.date=?) AND (?='' OR t.tour_id LIKE ?) AND (?='' OR t.office LIKE ?)
       AND (?='' OR (?='green' AND s.reason='admitted') OR (?='red' AND s.reason!='admitted')) ORDER BY s.id DESC LIMIT 1000`).all(date,date,tour,`%${tour}%`,office,`%${office}%`,status,status,status));
   });
-  app.get('/api/summary', auth('admin'), (req, res) => {
+  app.get('/api/summary', auth, (req, res) => {
     const date = req.query.date || serviceAt(now()).date;
     res.json(db.prepare(SUMMARY_SQL).all(date));
   });
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
-  app.get('/api/settings', auth('admin'), (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
+  app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
   const archive = archiveSql(false), cutoff = value => { const today = serviceAt(now()).date; return archiveCutoff(value || today, today); };
-  app.get('/api/archive', auth('admin'), (req, res) => {
+  app.get('/api/archive', auth, (req, res) => {
     const before = cutoff(req.query.before);
     res.json({ before, today: serviceAt(now()).date, counts: db.prepare(archive.counts).get(before), databaseBytes: databaseBytes(), cleanup: null });
   });
-  app.get('/api/archive/:dataset', auth('admin'), (req, res) => {
+  app.get('/api/archive/:dataset', auth, (req, res) => {
     const sql = Object.hasOwn(ARCHIVE_DATASETS, req.params.dataset) && ARCHIVE_DATASETS[req.params.dataset]; if (!sql) throw fail('Not found.', 404);
     const before = cutoff(req.query.before), { after, limit } = archivePage(new URL(req.url, 'http://local'));
     const rows = db.prepare(sql).all(before, after, limit);
     res.json({ rows, next: rows.length === limit ? rows.at(-1).cursor : null });
   });
-  app.post('/api/archive/clear', auth('admin'), (req, res) => {
+  app.post('/api/archive/clear', auth, (req, res) => {
     const before = archiveCutoff(req.body.before, serviceAt(now()).date);
     const deleted = transaction(db, () => ({ scans: db.prepare(archive.clearScans).run(before).changes, meals: db.prepare(archive.clearMeals).run(before).changes, pdfs: db.prepare(archive.clearPdfs).run(before).changes }));
     res.json({ deleted, done: deleted.scans < CLEAR_ROWS && deleted.meals < CLEAR_ROWS && deleted.pdfs < CLEAR_PDFS, cleanup: null });
   });
-  app.post('/api/settings', auth('admin'), (req, res) => {
+  app.post('/api/settings', auth, (req, res) => {
     const { printer: p, source: s } = req.body;
     if (p) {
       if (![p.widthMm,p.heightMm].every(n => typeof n === 'number' && Number.isFinite(n)) || p.widthMm < 40 || p.widthMm > 104 || p.heightMm < 50.8 || p.heightMm > 200 || (p.heightMm < 80 && p.widthMm < 70) || typeof p.name !== 'string' || p.name.length > 150) throw fail('Use a label width of 40–104 mm and height of 50.8–200 mm. Labels below 80 mm high need at least 70 mm width; enter the printer name.');
@@ -245,7 +243,7 @@ export function createApp(options = {}) {
     if (!equal(req.headers.authorization || '', `Bearer ${config.syncToken}`)) return res.status(401).json({ error: 'Invalid sync token.' });
     res.json({ ...source(), requestedAt: getSetting('syncRequestedAt',null), lastSuccess: getSetting('sync',null)?.lastSuccess || null });
   });
-  app.post('/api/sync/request', auth('admin'), (req,res)=>{setSetting('syncRequestedAt',now().toISOString());res.json({ok:true});});
+  app.post('/api/sync/request', auth, (req,res)=>{setSetting('syncRequestedAt',now().toISOString());res.json({ok:true});});
   app.post('/api/sync/tours', (req, res) => {
     if (!equal(req.headers.authorization || '', `Bearer ${config.syncToken}`)) return res.status(401).json({ error: 'Invalid sync token.' });
     const s = source(); if (req.body.spreadsheetId !== s.spreadsheetId || req.body.tab !== s.tab) throw fail('Source workbook or tab does not match Settings.',409);

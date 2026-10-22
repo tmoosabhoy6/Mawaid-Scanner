@@ -26,7 +26,7 @@ The code is implemented and covered by automated API, date-boundary, concurrency
 
 Before going live:
 
-1. Deploy the Cloudflare Worker with D1 using [these instructions](cloudflare/README.md), or use the persistent Node server below. Configure the three secrets. Cloudflare uses D1; the Node server's SQLite file requires a persistent disk.
+1. Deploy the Cloudflare Worker with D1 using [these instructions](cloudflare/README.md), or use the persistent Node server below. Configure the two secrets. Cloudflare uses D1; the Node server's SQLite file requires a persistent disk.
 2. Labels default to the confirmed **3 inch width × 2 inch height (76.2 × 50.8 mm)**, with the QR on the left and the Karbala al-Mualla calligraphy above the guest details on the right. Verify the computer’s exact printer name in Settings. Other supported labels are 40–104 mm wide and 50.8–200 mm high; labels below 80 mm high need at least 70 mm width.
 3. The confirmed source mapping is **arrival = Pehli Ziyarat**, **departure = Wada Ziyarat + one calendar day**. Departure remains included in meal eligibility. Manually entered tours use the actual departure date directly; no extra day is added to manual entries.
 4. Install the separate Apps Script file and its trigger as described below. The connected Google Sheets tools can read the spreadsheet but cannot install Apps Script code or triggers.
@@ -56,14 +56,14 @@ Use Node.js **24 or later** (the server uses Node's built-in SQLite API):
 npm ci
 npm run build
 cp .env.example .env
-# Edit .env and set strong, distinct ADMIN_PASSWORD and SCANNER_PASSWORD.
+# Edit .env and set a strong ADMIN_PASSWORD.
 # Set SYNC_TOKEN to a separately generated random secret of at least 32 characters.
 npm start
 ```
 
 For local verification use `APP_ORIGIN=http://localhost:3000`. HTTP localhost supports local camera access. Phones accessing another machine require a real HTTPS origin; phone `localhost` refers to the phone itself.
 
-Open the admin page and sign in as Administrator. Open `/scanner` on gate phones and use the Scanner password. Scanner accounts cannot view tours, PDFs, settings, or scan logs. Sessions expire after 12 hours. There is no default password.
+Open the admin page and sign in as Administrator. Only the administrator signs in: `/scanner` opens on gate phones without a password and can only check cards. Anyone who opens `/scanner` can check a card, but cannot view tours, PDFs, settings or scan logs. QR codes are random, so a card cannot be guessed. Admin sessions expire after 12 hours. There is no default password.
 
 ## Alternative: deploy the Node server
 

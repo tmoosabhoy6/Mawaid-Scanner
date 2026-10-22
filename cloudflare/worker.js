@@ -31,13 +31,11 @@ async function boundedBody(request,max=3_000_000,raw=false){
  if(raw)return data;
  try{const parsed=JSON.parse(new TextDecoder().decode(data));if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw Error();return parsed;}catch{throw fail('Send a JSON object.');}
 }
-async function authorized(request,db,required){
+// Only the administrator signs in. The scanner needs no session; older scanner sessions no longer count.
+async function authorized(request,db){
  const cookie=(request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('mawayid_session='))?.slice(16);
  if(!cookie||cookie.length>100)throw fail('Please sign in.',401);
- const session=await first(db,'SELECT role FROM sessions WHERE hash=? AND expires>?',await hash(cookie),Date.now());
- if(!session)throw fail('Please sign in.',401);
- if(required==='admin'&&session.role!=='admin')throw fail('Admin access is required.',403);
- return session.role;
+ if(!await first(db,"SELECT 1 FROM sessions WHERE hash=? AND expires>? AND role='admin'",await hash(cookie),Date.now()))throw fail('Please sign in.',401);
 }
 async function requireSync(request,env){if(!await equal(request.headers.get('Authorization')||'',`Bearer ${env.SYNC_TOKEN}`,env.SYNC_TOKEN))throw fail('Invalid sync token.',401);}
 export async function handleRequest(request,env,clock=()=>new Date()){
@@ -55,27 +53,26 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   if(request.headers.get('Sec-Fetch-Site')==='cross-site')throw fail('Cross-site request rejected.',403);
  }
  if(path==='/api/health'&&method==='GET'){await first(db,'SELECT 1');return json({status:'ok',hosting:'cloudflare-free'});}
- if(!env.ADMIN_PASSWORD||!env.SCANNER_PASSWORD||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)throw fail('Configure the app passwords and sync token before signing in.',503);
- if(await equal(env.ADMIN_PASSWORD,env.SCANNER_PASSWORD,env.SYNC_TOKEN))throw fail('Configure different admin and scanner passwords.',503);
+ if(!env.ADMIN_PASSWORD||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)throw fail('Configure the admin password and sync token before signing in.',503);
+ if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,startDate:START_DATE});
+ if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/login'&&method==='POST'){
-  const body=await boundedBody(request,2048),role=body.role==='scanner'?'scanner':'admin';
+  const body=await boundedBody(request,2048);
   const ip=request.headers.get('CF-Connecting-IP')||'local';const bucket=Math.floor(Date.now()/900000);
   const attempt=await first(db,'INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=attempts+1 RETURNING attempts',await hash(`${env.SYNC_TOKEN}:${ip}:${bucket}`),Date.now()+900000);
   if(attempt.attempts>20)throw fail('Too many sign-in attempts. Try again in 15 minutes.',429);
-  if(typeof body.password!=='string'||body.password.length>256||!await equal(body.password,role==='admin'?env.ADMIN_PASSWORD:env.SCANNER_PASSWORD,env.SYNC_TOKEN))throw fail('Incorrect password.',401);
-  const token=randomToken();await db.batch([stmt(db,'DELETE FROM sessions WHERE expires<?',Date.now()),stmt(db,'DELETE FROM login_attempts WHERE expires<?',Date.now()),stmt(db,'INSERT INTO sessions VALUES(?,?,?)',await hash(token),role,Date.now()+43200000)]);
-  return json({role},200,{'Set-Cookie':`mawayid_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${url.protocol==='https:'?'; Secure':''}`});
+  if(typeof body.password!=='string'||body.password.length>256||!await equal(body.password,env.ADMIN_PASSWORD,env.SYNC_TOKEN))throw fail('Incorrect password.',401);
+  const token=randomToken();await db.batch([stmt(db,'DELETE FROM sessions WHERE expires<?',Date.now()),stmt(db,'DELETE FROM login_attempts WHERE expires<?',Date.now()),stmt(db,'INSERT INTO sessions VALUES(?,?,?)',await hash(token),'admin',Date.now()+43200000)]);
+  return json({role:'admin'},200,{'Set-Cookie':`mawayid_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${url.protocol==='https:'?'; Secure':''}`});
  }
  if(path==='/api/sync/config'&&method==='GET'){await requireSync(request,env);return json({...await getSetting(db,'source',DEFAULT_SOURCE),requestedAt:await getSetting(db,'syncRequestedAt',null),lastSuccess:(await getSetting(db,'sync',null))?.lastSuccess||null});}
  if(path==='/api/sync/tours'&&method==='POST'){await requireSync(request,env);return syncTours(db,await boundedBody(request),stamp);}
- const role=await authorized(request,db,path==='/api/service'||path==='/api/session'||path==='/api/scan'||path==='/api/logout'?undefined:'admin');
- if(path==='/api/session'&&method==='GET')return json({role});
+ await authorized(request,db);
+ if(path==='/api/session'&&method==='GET')return json({role:'admin'});
  if(path==='/api/logout'&&method==='POST'){
   const cookie=(request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('mawayid_session='))?.slice(16);
   await run(db,'DELETE FROM sessions WHERE hash=?',await hash(cookie));return json({ok:true},200,{'Set-Cookie':'mawayid_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'});
  }
- if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,startDate:START_DATE});
- if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/tours'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase(),sort=url.searchParams.get('sort')||'',status=url.searchParams.get('status')||'';
   return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,

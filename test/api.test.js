@@ -92,7 +92,7 @@ test('before arrival, after departure and unknown QR deny access; former closed 
 
 test('roles, CSRF, login, validation, duplicate stays and printing setup',async()=>{
  const f=await fixture();try{
- await request(f.app).get('/api/tours').expect(401);await f.scanner.get('/api/tours').expect(403);await f.scanner.get('/api/settings').expect(403);
+ await request(f.app).get('/api/tours').expect(401);await f.scanner.get('/api/tours').expect(401);await f.scanner.get('/api/settings').expect(401);
  await f.admin.post('/api/tours').set('Origin','https://other.example').send({}).expect(403);
  await request(f.app).post('/api/login').send({role:'admin',password:'wrong'}).expect(401);
  await f.admin.post('/api/tours').send({tour_id:'x'}).expect(400);
@@ -146,7 +146,7 @@ test('daily sync schedule, sync request and machine config enforce permissions',
  const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:['06:00','12:00']};
  await f.admin.post('/api/settings').send({source}).expect(200);
  await f.admin.post('/api/settings').send({source:{...source,dailyTimes:['25:00']}}).expect(400);
- await f.scanner.post('/api/sync/request').send({}).expect(403);await f.admin.post('/api/sync/request').send({}).expect(200);
+ await f.scanner.post('/api/sync/request').send({}).expect(401);await f.admin.post('/api/sync/request').send({}).expect(200);
  await f.scanner.get('/api/sync/config').expect(401);
  const result=await request(f.app).get('/api/sync/config').set('Authorization',`Bearer ${config.syncToken}`).expect(200);
  assert.deepEqual(result.body.dailyTimes,['06:00','12:00']);assert.ok(result.body.requestedAt);
@@ -192,7 +192,7 @@ test('archive export pages records; clearing never touches today, active stays o
  let status=(await f.admin.get('/api/archive?before=2026-10-22').expect(200)).body;
  assert.deepEqual(status.counts,{scans:2,meals:1,pdfs:0});assert.equal(status.today,'2026-10-22');assert.ok(status.databaseBytes>0);
  await f.admin.get('/api/archive?before=2026-10-23').expect(400);
- await f.scanner.get('/api/archive').expect(403);await f.scanner.post('/api/archive/clear').send({before:'2026-10-22'}).expect(403);
+ await f.scanner.get('/api/archive').expect(401);await f.scanner.post('/api/archive/clear').send({before:'2026-10-22'}).expect(401);
  await f.admin.post('/api/archive/clear').send({}).expect(400);await f.admin.post('/api/archive/clear').send({before:''}).expect(400);await f.admin.get('/api/archive/unknown').expect(404);
  const first=(await f.admin.get('/api/archive/scans?before=2026-10-22&limit=1').expect(200)).body;
  assert.equal(first.rows.length,1);assert.equal(first.rows[0].tour_id,'26/3205');assert.equal(first.rows[0].reason,'admitted');assert.ok(first.next);
@@ -237,7 +237,7 @@ test('Safari cards: every field optional, admin only, listed by arrival and sear
  assert.equal(izan.body.pax,12);assert.equal(izan.body.its,null);
  await f.admin.post('/api/safaris').send({arrival:'2026-10-24',departure:'2026-10-21'}).expect(400);
  await f.admin.post('/api/safaris').send({pax:0}).expect(400);
- await f.scanner.get('/api/safaris').expect(403);await f.scanner.post('/api/safaris').send({}).expect(403);
+ await f.scanner.get('/api/safaris').expect(401);await f.scanner.post('/api/safaris').send({}).expect(401);
  const all=(await f.admin.get('/api/safaris').expect(200)).body;assert.deepEqual(all.map(s=>s.id),[izan.body.id,blank.body.id]);
  assert.deepEqual((await f.admin.get('/api/safaris').query({arrival:'2026-10-21'}).expect(200)).body.map(s=>s.id),[izan.body.id]);
  assert.deepEqual((await f.admin.get('/api/safaris').query({q:'izan'}).expect(200)).body.map(s=>s.id),[izan.body.id]);

@@ -12,7 +12,7 @@ const number = n => new Intl.NumberFormat('en-GB').format(Number(n) || 0);
 async function api(path, body) {
   const response = await fetch(`/api${path}`, { method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? {} : { 'Content-Type':'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const result = await response.json();
-  if (!response.ok) { if (response.status === 401 && path !== '/login') login(); throw Object.assign(new Error(result.error || 'Request failed.'), { status: response.status }); }
+  if (!response.ok) { if (response.status === 401 && path !== '/login' && location.pathname !== '/scanner') login(); throw Object.assign(new Error(result.error || 'Request failed.'), { status: response.status }); }
   return result;
 }
 function notify(message) { $('#notice').textContent = message; $('#notice').classList.add('visible'); clearTimeout(notify.timer); notify.timer = setTimeout(()=>$('#notice').classList.remove('visible'),7000); }
@@ -23,9 +23,9 @@ const brand = `<div class="brand"><img src="${LOGO}" alt="Faiz-e-Husaini Society
 const ornament = `<svg class="ornament" viewBox="0 0 200 18" aria-hidden="true"><path d="M0 9h82M118 9h82" stroke="currentColor" stroke-width="1" opacity=".55"/><g fill="none" stroke="currentColor" stroke-width="1.3"><rect x="94" y="3" width="12" height="12"/><rect x="94" y="3" width="12" height="12" transform="rotate(45 100 9)"/></g></svg>`;
 async function stopScanner() { clearInterval(scannerTimer); scannerTimer = null; if (camera) { try { await camera.stop(); } catch {} camera = null; } }
 function login() {
+  // Only the administrator signs in; the scanner at /scanner opens without a password.
   stopScanner(); role = null;
-  const scanner = location.pathname === '/scanner';
-  $('#app').innerHTML = `<div class="login">${brand}<section class="panel"><h1>${scanner ? 'Meal scanner' : 'Mawaid printing system'}</h1><p>Sign in to ${scanner ? 'scan meal cards' : 'manage tours and print meal cards'}.</p><form id="loginForm"><label>Access<select name="role"><option value="${scanner?'scanner':'admin'}">${scanner?'Scanner':'Administrator'}</option><option value="${scanner?'admin':'scanner'}">${scanner?'Administrator':'Scanner'}</option></select></label><label>Password<input name="password" type="password" autocomplete="current-password" required autofocus></label><div class="error" id="loginError" role="alert"></div><button class="primary">Sign in</button></form><small>Cards are checked against each stay’s dates, in Karbala time.</small></section></div>`;
+  $('#app').innerHTML = `<div class="login">${brand}<section class="panel"><h1>Mawaid printing system</h1><p>Sign in as Administrator to manage tours and print meal cards.</p><form id="loginForm"><label>Administrator password<input name="password" type="password" autocomplete="current-password" required autofocus></label><div class="error" id="loginError" role="alert"></div><button class="primary">Sign in</button></form><small>Cards are checked against each stay’s dates, in Karbala time.</small></section></div>`;
   $('#loginForm').onsubmit = async event => { event.preventDefault(); const f = new FormData(event.target); await busy($('button',event.target),async()=>{try { const data = await api('/login',Object.fromEntries(f)); role=data.role; await route(); } catch(err) { $('#loginError').textContent=err.message; } }); };
 }
 const navs = [['tours','▦','Tours'],['generate','＋','Add tour'],['prints','▤','Print log'],['logs','⌁','Scan log'],['summary','◫','Daily summary'],['settings','⚙','Settings']];
@@ -37,8 +37,8 @@ async function shell(view) {
 async function logout(){ await guard(async()=>{await api('/logout',{});login();}); }
 const heading=(title,desc,action='')=>`<div class="heading"><div><h1>${title}</h1><p>${desc}</p></div>${action}</div>`;
 async function route(){
+  if(location.pathname==='/scanner')return scannerView();
   if(!role)return;
-  if(location.pathname==='/scanner'||role==='scanner')return scannerView();
   const view=location.hash.slice(1)||'tours'; await shell(view);
   await guard(async()=>{await ({tours:toursView,generate:generateView,prints:printsView,logs:logsView,summary:summaryView,settings:settingsView}[view]||toursView)();});
 }
@@ -325,8 +325,7 @@ function zipBlob(entries){
 function downloadZip(filename,entries){const url=URL.createObjectURL(zipBlob(entries)),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 async function scannerView(){
   await stopScanner();currentView='scanner';
-  $('#app').innerHTML=`<div class="scanner-shell"><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47">Mawaid scanner</h1><button id="scannerLogout">Sign out</button></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Connecting…</strong></div><div class="camera-box" id="reader"></div><button class="primary" id="startCamera">Start camera</button><p class="scan-tip" id="scanTip">Hold one QR inside the frame. Wait for the result before admitting anyone.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div>`;
-  $('#scannerLogout').onclick=logout;
+  $('#app').innerHTML=`<div class="scanner-shell"><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47">Mawaid scanner</h1></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Connecting…</strong></div><div class="camera-box" id="reader"></div><button class="primary" id="startCamera">Start camera</button><p class="scan-tip" id="scanTip">Hold one QR inside the frame. Wait for the result before admitting anyone.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div>`;
   // Cards are checked at any time of day: green is a recognised card within its stay dates.
   let lastCode='',lastAt=0;
   const ready=()=>{if(!scannerBusy&&Date.now()-lastAt>=5000)showResult('','Ready to scan',service?`Cards are checked for ${service.date}`:'');};
@@ -359,4 +358,4 @@ async function scannerView(){
 }
 function showResult(color,title,detail){const box=$('#scanResult');if(!box)return;box.className=`scan-result ${color}`;box.innerHTML=`<strong>${e(title)}</strong><small>${e(detail)}</small>`;}
 function beep(green){try{const context=new(window.AudioContext||window.webkitAudioContext)();const osc=context.createOscillator(),gain=context.createGain();osc.connect(gain);gain.connect(context.destination);osc.frequency.value=green?900:220;gain.gain.value=.1;osc.start();osc.stop(context.currentTime+.15);osc.onended=()=>context.close();}catch{}}
-(async()=>{try{role=(await api('/session')).role;await route();}catch{login();}})();
+(async()=>{try{role=(await api('/session')).role;}catch{if(location.pathname!=='/scanner')return login();}await route();})();
