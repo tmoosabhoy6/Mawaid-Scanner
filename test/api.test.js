@@ -84,9 +84,9 @@ test('before arrival, after departure and unknown QR deny access; scans at any h
  for(const [clock,reason] of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-24T04:00:00Z','after_departure']]){
  f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'red');assert.equal(r.body.reason,reason);
  }
- for(const [clock,meal] of [['2026-10-21T02:00:00Z','breakfast'],['2026-10-21T12:00:00Z','lunch'],['2026-10-21T18:30:00Z','dinner'],['2026-10-23T07:59:00Z','breakfast']]){f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'green');assert.equal(r.body.meal,meal);}
+ for(const [clock,meal] of [['2026-10-21T02:00:00Z','breakfast'],['2026-10-21T12:00:00Z','lunch'],['2026-10-21T16:22:00Z','dinner'],['2026-10-23T07:59:00Z','breakfast']]){f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'green');assert.equal(r.body.meal,meal);}
  // Lunch runs until dinner starts, so a late lunch is a duplicate of the earlier one.
- f.setTime('2026-10-21T16:00:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'already_scanned');
+ f.setTime('2026-10-21T15:59:59Z');assert.equal((await scan(f,cards[0].token)).body.reason,'already_scanned');
  f.setTime('2026-10-23T20:59:00Z');const service=await f.scanner.get('/api/service').expect(200);assert.equal(service.body.date,'2026-10-23');assert.equal(service.body.meal,'dinner');
  assert.equal((await scan(f,'unknown')).body.reason,'unknown_card');
  }finally{f.close();}

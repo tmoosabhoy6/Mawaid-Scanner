@@ -101,9 +101,9 @@ test('scanner: valid QR green once per meal, unknown red, no yellow state',async
  }finally{dom?.window.close();f.close();}
 });
 
-test('scanner camera checks cards during meals and toggles on and off',async()=>{
+test('scanner camera shows dinner at 7:22 pm and toggles on and off',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T16:30:00Z');// Dinner in Karbala.
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T16:22:00Z');// 7:22 pm dinner in Karbala.
  dom=new JSDOM(html,{url:'https://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window,d=w.document;let decode,stopped=0;
  w.fetch=async(url,options={})=>{const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;let req=options.method==='POST'?f.scanner.post(path):f.scanner.get(path);if(options.body)req=req.send(JSON.parse(options.body));const r=await req;return{ok:r.status<300,status:r.status,json:async()=>r.body};};
@@ -111,6 +111,7 @@ test('scanner camera checks cards during meals and toggles on and off',async()=>
  w.MawaidCamera=class{async start(camera,config,onDecode){decode=onDecode;}async stop(){stopped++;}clear(){}};
  w.eval(js);
  await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ assert.match(d.querySelector('#scanResult').textContent,/Dinner/);
  const button=d.querySelector('#startCamera');
  button.click();await waitFor(()=>button.textContent==='Stop camera');
  decode(`MW1:${cards[0].token}`);
@@ -285,7 +286,7 @@ test('tours: Extend adds lunch or a whole day on the same cards, shows it on the
 
 test('scanner keeps checking cards offline with a full-screen result, then sends the scans when back online',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T04:00:00Z');
+ const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T16:22:00Z');
  dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
  Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
  w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
@@ -298,7 +299,7 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  assert.match(d.querySelector('#scanResult').textContent,/Checked offline/);assert.equal(d.querySelector('#linkChip').textContent,'Offline');
  await new Promise(r=>setTimeout(r,3100));send(`MW1:${cards[0].token}`);
  await waitFor(()=>d.querySelector('#scanResult strong').textContent==='ALREADY SCANNED');
- assert.equal(d.querySelector('#flash').className,'flash red');assert.match(d.querySelector('#scanResult').textContent,/at 7:00 am/);
+ assert.equal(d.querySelector('#flash').className,'flash red');assert.match(d.querySelector('#scanResult').textContent,/at 7:22 pm/);
  await new Promise(r=>setTimeout(r,1400));send('MW1:unknown');
  await waitFor(()=>/not on this phone/.test(d.querySelector('#scanResult').textContent));
  assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,3);
@@ -306,6 +307,7 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  // Back online: the next status check sends the queued scans, oldest first.
  offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
  await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.equal(f.db.prepare('SELECT meal FROM admissions').get().meal,'dinner');
  assert.deepEqual(f.db.prepare('SELECT reason,offline FROM scan_logs ORDER BY id').all().map(r=>[r.reason,r.offline]),[['admitted',1],['already_scanned',1],['unknown_card',1]]);
  await waitFor(()=>d.querySelector('#linkChip').textContent==='Online');
  // Online again, a duplicate is still caught by the server.

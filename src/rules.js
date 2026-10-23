@@ -10,8 +10,8 @@ export function localTime(now = new Date()) {
 }
 export const MEALS = [
   { id: 'breakfast', label: 'Breakfast', start: 0, end: 11 * 60, hours: 'until 11:00 am' },
-  { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 19 * 60 + 30, hours: '11:00 am–7:30 pm' },
-  { id: 'dinner', label: 'Dinner', start: 19 * 60 + 30, end: 24 * 60, hours: 'from 7:30 pm' },
+  { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 19 * 60, hours: '11:00 am–7:00 pm' },
+  { id: 'dinner', label: 'Dinner', start: 19 * 60, end: 24 * 60, hours: 'from 7:00 pm' },
 ];
 // Meals cover the whole Karbala day: anything before lunch starts is breakfast, anything before dinner
 // starts is lunch, and the rest of the day is dinner. They only stop a second admission for the same meal.

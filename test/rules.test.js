@@ -4,8 +4,8 @@ import { eligibility,localTime,serviceAt,validateTour,validateSafari } from '../
 const day='2026-10-21';
 const at=(h,m,s=0)=>new Date(Date.UTC(2026,9,21,h-3,m,s));
 const card={arrival:day,departure:day};
-test('every Karbala time belongs to a meal: breakfast before 11:00, lunch before 19:30, then dinner',()=>{
- for(const [h,m,s,meal] of [[3,0,0,'breakfast'],[6,0,0,'breakfast'],[8,30,0,'breakfast'],[10,59,59,'breakfast'],[11,0,0,'lunch'],[15,0,0,'lunch'],[19,29,59,'lunch'],[19,30,0,'dinner'],[20,30,0,'dinner'],[23,59,59,'dinner']]) {
+test('every Karbala time belongs to a meal: breakfast before 11:00, lunch before 19:00, then dinner',()=>{
+ for(const [h,m,s,meal] of [[3,0,0,'breakfast'],[6,0,0,'breakfast'],[8,30,0,'breakfast'],[10,59,59,'breakfast'],[11,0,0,'lunch'],[15,0,0,'lunch'],[18,59,59,'lunch'],[19,0,0,'dinner'],[19,22,0,'dinner'],[20,30,0,'dinner'],[23,59,59,'dinner']]) {
    assert.equal(eligibility(card,at(h,m,s)).allowed,true);assert.equal(serviceAt(at(h,m,s)).meal,meal);
  }
 });
