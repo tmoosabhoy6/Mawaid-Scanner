@@ -6,7 +6,7 @@ export const ARCHIVE_PAGE = 1000, CLEAR_ROWS = 1000, CLEAR_PDFS = 20;
 // Clean-up stops at 40,000 so scanning and printing always keep most of the daily allowance.
 export const CLEANUP_WRITE_BUDGET = 40_000, CLEANUP_CHUNK_WRITES = 8_000;
 export const ARCHIVE_DATASETS = {
-  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
+  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason,s.offline FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     WHERE s.date<?1 AND s.id>?2 ORDER BY s.id LIMIT ?3`,
   meals: `SELECT a.rowid AS cursor,a.date,a.meal,a.scanned_at,t.id AS tour_key,t.tour_id,t.office,p.person_no FROM admissions a JOIN people p ON p.id=a.person_id JOIN tours t ON t.id=p.tour_id
     WHERE a.date<?1 AND a.rowid>?2 ORDER BY a.rowid LIMIT ?3`,
@@ -16,6 +16,8 @@ export const ARCHIVE_DATASETS = {
     WHERE ?1<>'' AND c.rowid>?2 ORDER BY c.rowid LIMIT ?3`,
   prints: `SELECT b.rowid AS cursor,b.id AS batch_id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_saved,(SELECT COUNT(*) FROM cards c WHERE c.batch_id=b.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS labels
     FROM batches b WHERE ?1<>'' AND b.rowid>?2 ORDER BY b.rowid LIMIT ?3`,
+  extensions: `SELECT e.rowid AS cursor,t.tour_id,t.office,t.departure,e.date,e.meals,e.created_at,e.removed_at FROM tour_extensions e JOIN tours t ON t.id=e.tour_id
+    WHERE ?1<>'' AND e.rowid>?2 ORDER BY e.rowid LIMIT ?3`,
 };
 // A label PDF can be cleared once every stay printed in it has departed before the cut-off date.
 // An undated Safari card counts as departing on the day its stickers were printed.

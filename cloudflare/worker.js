@@ -1,13 +1,13 @@
-import { serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from '../src/rules.js';
-import { SCAN_SQL } from '../src/scan-query.js';
-import { SUMMARY_SQL } from '../src/summary.js';
+import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
+import { SUMMARY_SQL, OUTSIDE_SQL, outsideCounts, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
+import { offlineData } from '../src/offline.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
 const DEFAULT_SOURCE={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:[]};
-const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–3:00 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today'};
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const json=(body,status=200,headers={})=>Response.json(body,{status,headers:{'Cache-Control':'no-store',...headers}});
 const stmt=(db,sql,...args)=>db.prepare(sql).bind(...args);
@@ -56,6 +56,8 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  if(path==='/api/health'&&method==='GET'){await first(db,'SELECT 1');return json({status:'ok',hosting:'cloudflare-free'});}
  if(!env.ADMIN_PASSWORD||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)throw fail('Configure the admin password and sync token before signing in.',503);
  if(path==='/api/service'&&method==='GET')return json({...serviceAt(clock()),serverTime:stamp,timezone:TIME_ZONE,startDate:START_DATE});
+ // Gate phones keep a copy of current cards for checking while the connection is down (see src/offline.js).
+ if(path==='/api/scanner/data'&&method==='GET')return json(await offlineData((sql,...args)=>all(db,sql,...args),url,{...serviceAt(clock()),serverTime:stamp},'base64'));
  if(path==='/api/scan'&&method==='POST')return scan(db,await boundedBody(request,2048),clock());
  if(path==='/api/login'&&method==='POST'){
   const body=await boundedBody(request,2048);
@@ -107,6 +109,23 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',key);if(existing)return json({id:existing.id,existing:true});throw error;}
   return json({id,count:ids.length},201);
  }
+ // Extending a stay adds meals after departure on the same QR cards; changes keep their history.
+ const extension=path.match(/^\/api\/tours\/([\w-]+)\/extensions$/);
+ if(extension&&method==='GET')return json(await all(db,EXTENSIONS_SQL,extension[1]));
+ if(extension&&method==='POST'){
+  const body=await boundedBody(request,1024),tour=await first(db,'SELECT id,departure,active FROM tours WHERE id=?',extension[1]);
+  let x;try{x=validateExtension(body,tour,serviceAt(clock()).date);}catch(e){throw fail(e.message,e.status);}
+  const current=await first(db,'SELECT * FROM tour_extensions WHERE tour_id=? AND date=? AND removed_at IS NULL',tour.id,x.date);
+  if(current?.meals===x.meals)return json({...current,existing:true});
+  const row={id:crypto.randomUUID(),tour_id:tour.id,date:x.date,meals:x.meals,created_at:stamp};
+  await db.batch([stmt(db,'UPDATE tour_extensions SET removed_at=? WHERE tour_id=? AND date=? AND removed_at IS NULL',stamp,tour.id,x.date),stmt(db,'INSERT INTO tour_extensions(id,tour_id,date,meals,created_at) VALUES(?,?,?,?,?)',...Object.values(row))]);
+  return json(row,201);
+ }
+ const removeExtension=path.match(/^\/api\/extensions\/([\w-]+)\/remove$/);
+ if(removeExtension&&method==='POST'){
+  const result=await run(db,'UPDATE tour_extensions SET removed_at=? WHERE id=? AND removed_at IS NULL',stamp,removeExtension[1]);
+  if(!result.meta?.changes)throw fail('This extension was already removed.',404);return json({ok:true});
+ }
  const people=path.match(/^\/api\/tours\/([\w-]+)\/people$/);
  if(people&&method==='GET')return json(await all(db,'SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no',people[1]));
  if(path==='/api/labels'&&method==='POST')return issueLabels(db,await boundedBody(request,100000),env,stamp);
@@ -138,8 +157,9 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
-  return json(await first(db,SUMMARY_SQL,date));
+  return json({...await first(db,SUMMARY_SQL,date),outside:outsideCounts(await all(db,OUTSIDE_SQL,date))});
  }
+ if(path==='/api/summary/tours'&&method==='GET')return json(await all(db,TOUR_REPORT_SQL,url.searchParams.get('date')||serviceAt(clock()).date));
  if(path==='/api/settings'&&method==='GET'){
   const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }
@@ -154,7 +174,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const counts=await first(db,archiveSql(true).counts,before),info=await stmt(db,'SELECT 1').all();
   return json({before,today,counts,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000,cleanup:await cleanupUsage(db,clock())});
  }
- const dataset=path.match(/^\/api\/archive\/(scans|meals|tours|cards|prints)$/);
+ const dataset=path.match(/^\/api\/archive\/(scans|meals|tours|cards|prints|extensions)$/);
  if(dataset&&method==='GET'){
   const today=serviceAt(clock()).date,before=archiveCutoff(url.searchParams.get('before')||today,today),{after,limit}=archivePage(url);
   const rows=await all(db,ARCHIVE_DATASETS[dataset[1]],before,after,limit);
@@ -167,12 +187,14 @@ export async function handleRequest(request,env,clock=()=>new Date()){
 async function scan(db,body,now){
  if(!keyValid(body.requestKey))throw fail('A scan request key is required.');
  if(typeof body.code!=='string'||body.code.length>300)throw fail('Invalid QR code.');
- const service=serviceAt(now),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
+ // A scan made on an offline phone is checked as at the time it was made.
+ const offlineAt=offlineTime(body,now),at=offlineAt||now;
+ const service=serviceAt(at),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
- const row=await first(db,SCAN_SQL,body.requestKey,service.date,now.toISOString(),codeHash,service.meal);
+ const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),codeHash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
- const replayed=!row;
- return json({...result,replayed,status:result.reason==='admitted'&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
+ const replayed=!row,earlier=result.reason==='already_scanned'?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
+ return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:result.reason==='admitted'&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
 }
 async function batchManifest(db,id,env){
  const row=await first(db,'SELECT id,envelope,pdf IS NOT NULL AS pdf_ready,remaining FROM batches WHERE id=?',id);

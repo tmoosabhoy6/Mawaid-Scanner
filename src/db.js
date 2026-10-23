@@ -41,6 +41,9 @@ export function openDatabase(path) {
   if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='daily_scan_counts'").get()) {
     transaction(db, () => db.exec(readFileSync(new URL('../cloudflare/migrations/0004_query_cost_and_daily_counts.sql', import.meta.url), 'utf8')));
   }
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='tour_extensions'").get()) {
+    transaction(db, () => db.exec(readFileSync(new URL('../cloudflare/migrations/0005_extensions_offline_scans.sql', import.meta.url), 'utf8')));
+  }
   return db;
 }
 // Databases created before tour IDs became optional are rebuilt once, keeping every row and rowid.

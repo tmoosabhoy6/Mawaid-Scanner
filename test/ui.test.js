@@ -184,7 +184,7 @@ test('archive & clear saves CSV folders inside Mawaid Archive, then clears only 
  await startArchive(w,d);
  const root=documents.dirs.get('Mawaid Archive');assert.ok(root);assert.equal(root.dirs.size,1);
  const [name,archive]=[...root.dirs][0];assert.match(name,/^Archive \d{4}-\d{2}-\d{2} \d{2}\.\d{2}$/);
- assert.deepEqual([...archive.files.keys()].sort(),['cards.csv','daily-meal-summary.csv','meals-served.csv','print-log.csv','read-me.txt','scan-log.csv','tours.csv']);
+ assert.deepEqual([...archive.files.keys()].sort(),['cards.csv','daily-meal-summary.csv','extensions.csv','meals-served.csv','print-log.csv','read-me.txt','scan-log.csv','tours.csv']);
  const scans=archive.files.get('scan-log.csv');assert.match(scans,/26\/3205,FH Kuwait,1,Admitted,admitted/);assert.match(scans,/Declined,unknown card/);
  assert.match(archive.files.get('daily-meal-summary.csv'),/2026-10-21,26\/3205,FH Kuwait,2,1,0,0/);
  assert.ok(![...archive.files.keys()].some(n=>n.endsWith('.pdf')));
@@ -255,9 +255,61 @@ test('daily summary shows each meal and total; scanner status pauses in hidden t
  const phone=dom.window;let tick,interval,statusRequests=0,hidden=false;
  Object.defineProperty(phone.document,'hidden',{get:()=>hidden});
  phone.setInterval=(fn,ms)=>{tick=fn;interval=ms;return 1;};phone.clearInterval=()=>{};
- phone.fetch=async(url)=>{if(url==='/api/service')statusRequests++;return{ok:true,json:async()=>({date:'2026-10-21',meal:'dinner',mealLabel:'Dinner'})};};
+ phone.fetch=async(url)=>{if(url.startsWith('/api/scanner/data'))statusRequests++;return{ok:true,json:async()=>({date:'2026-10-21',meal:'dinner',mealLabel:'Dinner'})};};
  phone.eval(js);await waitFor(()=>tick);assert.equal(interval,60000);assert.equal(statusRequests,1);
  hidden=true;await tick();assert.equal(statusRequests,1);
  hidden=false;phone.document.dispatchEvent(new phone.Event('visibilitychange'));await waitFor(()=>statusRequests===2);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('tours: Extend adds lunch or a whole day on the same cards, shows it on the row and keeps history',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2);await issue(f,t.id);
+ dom=domFor(f);const w=dom.window,d=w.document;
+ await waitFor(()=>d.querySelector('.extend'));
+ d.querySelector('.extend').click();await waitFor(()=>d.querySelector('#extendDate'));
+ assert.ok(d.querySelector('#peopleDialog').hasAttribute('open'));assert.equal(d.querySelector('#extendDate').value,'2026-10-24');
+ assert.match(d.querySelector('#peopleContent').textContent,/nothing new to print/);
+ d.querySelector('[data-meals=lunch]').click();
+ await waitFor(()=>d.querySelector('.remove-extension'));
+ assert.deepEqual(f.db.prepare('SELECT date,meals FROM tour_extensions').all().map(r=>({...r})),[{date:'2026-10-24',meals:'lunch'}]);
+ await waitFor(()=>/\+ Sat 24 Oct · Lunch/.test(d.querySelector('#tourTable').textContent));
+ d.querySelector('[data-meals=day]').click();
+ await waitFor(()=>d.querySelectorAll('.extension-list li').length===2);
+ assert.match(d.querySelector('.extension-list li.removed').textContent,/Lunch only/);
+ await waitFor(()=>/\+ Sat 24 Oct · All day/.test(d.querySelector('#tourTable').textContent));
+ d.querySelector('.remove-extension').click();await waitFor(()=>!d.querySelector('.remove-extension'));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tour_extensions WHERE removed_at IS NULL').get().n,0);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('scanner keeps checking cards offline with a full-screen result, then sends the scans when back online',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T04:00:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ assert.match(d.querySelector('#scannerStatus').textContent,/2 cards on this phone/);assert.equal(d.querySelector('#linkChip').textContent,'Online');
+ const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode'),send=code=>{input.value=code;submit(w,form);};
+ offline=true;send(`MW1:${cards[0].token}`);
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
+ assert.equal(d.querySelector('#flash').hidden,false);assert.equal(d.querySelector('#flash').className,'flash green');
+ assert.match(d.querySelector('#scanResult').textContent,/Checked offline/);assert.equal(d.querySelector('#linkChip').textContent,'Offline');
+ await new Promise(r=>setTimeout(r,3100));send(`MW1:${cards[0].token}`);
+ await waitFor(()=>d.querySelector('#scanResult strong').textContent==='ALREADY SCANNED');
+ assert.equal(d.querySelector('#flash').className,'flash red');assert.match(d.querySelector('#scanResult').textContent,/at 7:00 am/);
+ await new Promise(r=>setTimeout(r,1400));send('MW1:unknown');
+ await waitFor(()=>/not on this phone/.test(d.querySelector('#scanResult').textContent));
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,3);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
+ // Back online: the next status check sends the queued scans, oldest first.
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT reason,offline FROM scan_logs ORDER BY id').all().map(r=>[r.reason,r.offline]),[['admitted',1],['already_scanned',1],['unknown_card',1]]);
+ await waitFor(()=>d.querySelector('#linkChip').textContent==='Online');
+ // Online again, a duplicate is still caught by the server.
+ await new Promise(r=>setTimeout(r,1400));send(`MW1:${cards[0].token}`);
+ await waitFor(()=>/Already admitted/.test(d.querySelector('#scanResult').textContent)&&!/offline/.test(d.querySelector('#scanResult').textContent));
  }finally{dom?.window.close();f.close();}
 });

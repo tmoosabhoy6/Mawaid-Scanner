@@ -10,7 +10,7 @@ import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -229,11 +229,12 @@ test('Cloudflare: migration 0002 keeps every tour, person, card and admission of
  }finally{await f.close();}
 });
 
-test('Cloudflare: original-schema scanning still enforces the meal admission trigger',async()=>{
+test('Cloudflare: cards from the original schema still scan once per meal after every migration',async()=>{
  const f=await fixture({},MIGRATIONS.slice(0,1));try{
  const token='T'.repeat(43),digest=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))).toString('base64');
  await f.db.batch([`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('t1','26/1','A','2026-10-21','2026-10-24',1,'x')`,`INSERT INTO people VALUES('p1','t1',1)`,
   `INSERT INTO batches(id,created_at,kind,request_key) VALUES('b1','x','initial','k1')`,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES('c1','p1','b1','${digest}','x')`].map(sql=>f.db.prepare(sql)));
+ for(const file of MIGRATIONS.slice(1))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
  assert.equal((await f.scan(token)).data.status,'green');for(let n=0;n<2;n++)assert.equal((await f.scan(token)).data.reason,'already_scanned');
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,4);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,1);
@@ -294,7 +295,7 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
  const scans=[];
  for(const [key,meal] of [['load-first','breakfast'],['load-duplicate','breakfast'],['load-lunch','lunch'],['load-dinner','dinner']]) {
-   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal).all();
+   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0).all();
    assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
    assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
  }
@@ -306,11 +307,20 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  // A date without a counter still returns zeroes. Deleting old logs updates their stored totals.
  assert.equal((await f.call('/summary?date=2026-10-19')).data.scans,0);
  await f.db.prepare("DELETE FROM scan_logs WHERE date='2026-10-21'").run();assert.equal((await f.call('/summary?date=2026-10-21')).data.scans,0);
+ // A gate phone downloads every current card once; each later poll reads only what changed since.
+ const {offlineData}=await import('../src/offline.js');const reads=[];
+ const q=async(sql,...args)=>{const r=await f.db.prepare(sql).bind(...args).all();reads.push(r.meta.rows_read);return r.results;};
+ const full=await offlineData(q,new URL('https://x/'),{date:'2026-10-21'},'base64');
+ assert.equal(full.cards.length,10000);assert.equal(full.tours.length,500);assert.equal(full.admissions.length,3);
+ const fullReads=reads.splice(0).reduce((a,b)=>a+b,0);assert.ok(fullReads<60000,String(fullReads));
+ const poll=await offlineData(q,new URL(`https://x/?cards=${full.cardCursor}&admissions=${full.admissionCursor}&date=2026-10-21`),{date:'2026-10-21'},'base64');
+ assert.equal(poll.cards.length,0);assert.equal(poll.admissions.length,0);assert.equal(poll.tours,undefined);
+ const pollReads=reads.splice(0).reduce((a,b)=>a+b,0);assert.ok(pollReads<20,String(pollReads));
  // Public status checks are safe even if the database binding would throw on any I/O.
  const {respond}=await import('../cloudflare/worker.js');
  const status=await respond(new Request('https://mawayid.test/api/service'),{...config,DB:{prepare(){throw Error('Unexpected D1 read');}}},()=>new Date('2026-10-21T04:00:00Z'));
  assert.equal(status.status,200);assert.equal((await status.json()).meal,'breakfast');
- t.diagnostic(JSON.stringify({dataset:{tours:500,cards:10000,old_scans:20000},tour_rows_read:list.meta.rows_read,summary_rows_read:summary.meta.rows_read,scans:scans.map(m=>({read:m.rows_read,written:m.rows_written}))}));
+ t.diagnostic(JSON.stringify({dataset:{tours:500,cards:10000,old_scans:20000},tour_rows_read:list.meta.rows_read,offline_full_rows_read:fullReads,offline_poll_rows_read:pollReads,summary_rows_read:summary.meta.rows_read,scans:scans.map(m=>({read:m.rows_read,written:m.rows_written}))}));
  }finally{await f.close();}
 });
 
@@ -318,10 +328,37 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  const f=await fixture({},MIGRATIONS.slice(0,3));try{
  await f.db.prepare(`INSERT INTO scan_logs(request_key,date,meal,reason,scanned_at) VALUES('legacy1','2026-10-20',NULL,'admitted','x'),('legacy2','2026-10-20',NULL,'admitted','x'),('declined','2026-10-20',NULL,'unknown_card','x')`).run();
  const before=(await f.db.prepare('SELECT * FROM scan_logs').all()).results;
- await f.db.batch(statements(MIGRATIONS[3]).map(sql=>f.db.prepare(sql)));
- assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before);
+ for(const file of MIGRATIONS.slice(3))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
+ // 0005 only adds the offline flag, which is 0 for every earlier scan.
+ assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
- assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
+ assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2,outside:{breakfast:0,lunch:0,dinner:0}});
  assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: extended stays, offline scans, the phone card list and the tour report',async()=>{
+ const f=await fixture();try{
+ const t=await f.tour(2),b=await f.issue(t.id),[one,two]=b.cards;
+ // The phone's list holds base64 card hashes and no office names.
+ const full=(await f.call('/scanner/data',undefined,'scanner')).data;
+ assert.equal(full.hash,'base64');assert.deepEqual(full.cards.map(c=>c[0]).sort(),[await hash(one.token),await hash(two.token)].sort());assert.ok(!JSON.stringify(full).includes('Test office'));
+ assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'},'scanner')).status,401);
+ assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-24',meals:'lunch'})).status,400);
+ const ext=await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'});assert.equal(ext.status,201);
+ f.setTime('2026-10-25T04:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'extension_other_meal');
+ f.setTime('2026-10-25T09:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
+ const dup=await f.scan(one.token);assert.equal(dup.data.reason,'already_scanned');assert.equal(dup.data.firstScannedAt,green.data.scanned_at);
+ f.setTime('2026-10-26T04:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'after_departure');
+ // An offline phone's lunch scan from yesterday is counted for yesterday.
+ const offline=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-25T09:30:00Z',offlineStatus:'green'},'scanner');
+ assert.deepEqual([offline.data.reason,offline.data.date,offline.data.meal,offline.data.offline],['admitted','2026-10-25','lunch',1]);
+ const declined=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-21T09:30:00Z',offlineStatus:'green'},'scanner');assert.equal(declined.status,400);
+ const report=(await f.call('/summary/tours?date=2026-10-25')).data;
+ assert.deepEqual(report.map(r=>[r.tour_id,r.extension,r.breakfast,r.lunch,r.dinner]),[['26/1','lunch',0,2,0]]);
+ assert.equal((await f.call('/summary?date=2026-10-25')).data.lunch,2);
+ assert.equal((await f.call(`/extensions/${ext.data.id}/remove`,{})).status,200);
+ assert.equal((await f.call(`/tours/${t.id}/extensions`)).data[0].removed_at!==null,true);
+ assert.equal((await f.call('/archive/extensions?before=2026-10-26')).data.rows.length,1);
  }finally{await f.close();}
 });

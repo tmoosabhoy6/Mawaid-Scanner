@@ -6,6 +6,7 @@ export function tourList({ arrival = '', q = '', sort = '', status = '' } = {}) 
   if (q) { where.push('(instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0)'); params.push(q,q,q); }
   return { sql: `SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM
     (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
+      (SELECT group_concat(e.date||' '||e.meals) FROM tour_extensions e WHERE e.tour_id=t.id AND e.removed_at IS NULL) AS extensions,
       (SELECT b.id FROM people p CROSS JOIN cards c ON c.person_id=p.id JOIN batches b ON b.id=c.batch_id
         WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
       FROM tours t WHERE ${where.join(' AND ')} ORDER BY ${listOrder(sort,'t.')} LIMIT 1000) x

@@ -186,3 +186,32 @@ dialog::backdrop{background:rgba(3,6,12,.7)}
 .print-method-title{margin-top:24px}.print-method{display:grid;gap:10px;margin-bottom:16px}.print-method label{display:flex;gap:10px;align-items:center;font-weight:400}.print-method input{width:auto;min-height:0;margin:0;flex:none}
 .tone-field{max-width:320px;margin-bottom:16px}
 tbody tr.printed-row td{background:rgba(214,64,82,.32)}tbody tr.printed-row:hover td{background:rgba(214,64,82,.4)}
+/* Scanner: full-screen result flash and connection chip */
+.flash{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:24px;text-align:center;color:#fff;cursor:pointer}
+.flash[hidden]{display:none}
+.flash.green{background:#00b84a}
+.flash.red{background:#e0001b}
+.flash strong{font-size:clamp(2.75rem,13vw,5.5rem);line-height:1.05;font-weight:700;letter-spacing:.01em}
+.flash span{font-size:1.375rem;font-weight:500;max-width:30ch}
+.link-chip{padding:5px 12px;border-radius:999px;font-size:.875rem;font-weight:600;white-space:nowrap}
+.link-chip:empty{display:none}
+.link-chip.online{background:#143a2a;color:var(--green-text)}
+.link-chip.offline{background:#5a3d0b;color:#ffd98a}
+/* Extend stay */
+.extend-day{max-width:260px;margin:18px 0}
+.extend-choices{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.extend-choices button{display:grid;gap:4px;min-height:84px;text-align:center}
+.extend-choices button b{font-size:1.25rem;font-weight:600}
+.extend-choices button small{color:inherit;opacity:.85}
+.extension-list{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px}
+.extension-list li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 14px;border-radius:10px;background:#18243a}
+.extension-list li.removed{opacity:.55}
+.extension-list li.removed b{text-decoration:line-through}
+.extension-list button{min-height:40px;padding:6px 14px}
+.ext-chip{display:inline-block;margin-left:6px;padding:3px 9px;border-radius:999px;background:#173a4a;color:#9fdcf0;font-size:.8125rem;white-space:nowrap}
+/* Daily summary */
+.outside-note{display:block;margin-top:6px;color:#ffd98a;font-size:.875rem}
+.report td.meal b{font-size:1.0625rem;font-variant-numeric:tabular-nums}
+.report td.meal.full b{color:var(--green-text)}
+.report tfoot td{font-weight:600;border-top:1px solid var(--line)}
+@media(max-width:900px){.extend-choices{grid-template-columns:1fr}}

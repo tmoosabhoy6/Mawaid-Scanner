@@ -55,3 +55,18 @@ export function validateSafari(input) {
   if (safari.pax !== null && (!Number.isInteger(safari.pax) || safari.pax < 1 || safari.pax > 10000)) throw new Error('PAX must be a whole number from 1 to 10,000, or blank.');
   return safari;
 }
+export const addDays = (date, days) => new Date(Date.parse(date) + days * 86400000).toISOString().slice(0, 10);
+// An extension adds meals on one day after the stay ends: the whole day, or lunch only. The same QR cards keep working.
+export const EXTENSION_MEALS = { day: 'Whole day', lunch: 'Lunch only' };
+export const MAX_EXTENSION_DAYS = 30;
+export function validateExtension(input, tour, today) {
+  const date = input?.date, meals = input?.meals;
+  if (!Object.hasOwn(EXTENSION_MEALS, meals)) throw new Error('Choose Whole day or Lunch only.');
+  if (!validDate(date)) throw new Error('Choose the day to extend.');
+  if (!tour) throw Object.assign(new Error('Tour not found.'), { status: 404 });
+  if (!tour.active) throw new Error('This tour is no longer active in the source sheet.');
+  if (date <= tour.departure) throw new Error(`Every meal up to ${tour.departure} is already included. Choose a later day.`);
+  if (date < today) throw new Error('Choose today or a later day.');
+  if (date > addDays(tour.departure, MAX_EXTENSION_DAYS)) throw new Error(`Extend up to ${MAX_EXTENSION_DAYS} days after departure.`);
+  return { date, meals };
+}

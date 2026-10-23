@@ -4,17 +4,18 @@ import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
-import { eligibility, serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from './rules.js';
+import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
-import { SUMMARY_SQL } from './summary.js';
+import { SUMMARY_SQL, OUTSIDE_SQL, outsideCounts, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
+import { offlineData } from './offline.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual(Buffer.from(x), Buffer.from(y)); };
 const uid = () => randomUUID();
 const token = () => randomBytes(32).toString('base64url');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–3:00 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today' };
 export function createApp(options = {}) {
   const config = { origin: process.env.APP_ORIGIN || 'http://localhost:3000',
     adminPassword: process.env.ADMIN_PASSWORD || '',
@@ -110,6 +111,24 @@ export function createApp(options = {}) {
     });
     res.status(201).json({ id, count: ids.length });
   });
+  // Extending a stay adds meals after departure on the same QR cards; changes keep their history.
+  app.get('/api/tours/:id/extensions', auth, (req, res) => res.json(db.prepare(EXTENSIONS_SQL).all(req.params.id)));
+  app.post('/api/tours/:id/extensions', auth, (req, res) => {
+    const tour = db.prepare('SELECT id,departure,active FROM tours WHERE id=?').get(req.params.id);
+    let x; try { x = validateExtension(req.body, tour, serviceAt(now()).date); } catch (e) { throw fail(e.message, e.status); }
+    const stamp = now().toISOString(), row = { id: uid(), tour_id: tour.id, date: x.date, meals: x.meals, created_at: stamp };
+    const current = db.prepare('SELECT * FROM tour_extensions WHERE tour_id=? AND date=? AND removed_at IS NULL').get(tour.id, x.date);
+    if (current?.meals === x.meals) return res.json({ ...current, existing: true });
+    transaction(db, () => {
+      db.prepare('UPDATE tour_extensions SET removed_at=? WHERE tour_id=? AND date=? AND removed_at IS NULL').run(stamp, tour.id, x.date);
+      db.prepare('INSERT INTO tour_extensions(id,tour_id,date,meals,created_at) VALUES(?,?,?,?,?)').run(...Object.values(row));
+    });
+    res.status(201).json(row);
+  });
+  app.post('/api/extensions/:id/remove', auth, (req, res) => {
+    if (!db.prepare('UPDATE tour_extensions SET removed_at=? WHERE id=? AND removed_at IS NULL').run(now().toISOString(), req.params.id).changes) throw fail('This extension was already removed.', 404);
+    res.json({ ok: true });
+  });
   app.get('/api/tours/:id/people', auth, (req, res) => res.json(db.prepare(`SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no`).all(req.params.id)));
   app.post('/api/labels', auth, async (req, res) => {
     if (typeof req.body.requestKey !== 'string' || !/^[\w-]{16,100}$/.test(req.body.requestKey)) throw fail('A valid request key is required.');
@@ -175,24 +194,25 @@ export function createApp(options = {}) {
     if (!['sent_to_printer','printer_error'].includes(req.body.status)) throw fail('Invalid printer status.');
     db.prepare('UPDATE batches SET printer_status=? WHERE id=? AND pdf IS NOT NULL').run(req.body.status, req.params.id); res.json({ ok: true });
   });
+  // Gate phones keep a copy of current cards for checking while the connection is down (see offline.js).
+  app.get('/api/scanner/data', async (req, res) => {
+    const all = (sql, ...args) => db.prepare(sql).all(...args);
+    res.json(await offlineData(all, new URL(req.url, 'http://local'), { ...serviceAt(now()), serverTime: now().toISOString() }, 'hex'));
+  });
   app.post('/api/scan', (req, res) => {
     const { requestKey, code } = req.body;
     if (typeof requestKey !== 'string' || !/^[\w-]{16,100}$/.test(requestKey)) throw fail('A scan request key is required.');
     if (typeof code !== 'string' || code.length > 300) throw fail('Invalid QR code.');
+    // A scan made on an offline phone is checked as at the time it was made.
+    const offlineAt = offlineTime(req.body, now()), at = offlineAt || now(), service = serviceAt(at);
+    const codeHash = code.startsWith('MW1:') ? hash(code.slice(4)) : '';
     const result = transaction(db, () => {
-      const previous = db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey);
-      if (previous) return { ...previous, replayed: true };
-      const c = code.startsWith('MW1:') ? db.prepare(`SELECT c.*,p.person_no,p.tour_id,t.arrival,t.departure,t.pax,t.active,t.office,t.tour_id AS display_tour FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id WHERE c.token_hash=?`).get(hash(code.slice(4))) : null;
-      const check = eligibility(c, now()); let reason = check.reason;
-      if (c && !c.active) reason = 'inactive_tour';
-      if (check.allowed && c.person_no > c.pax) reason = 'over_capacity';
-      if (reason === 'admitted' && db.prepare('SELECT 1 FROM admissions WHERE person_id=? AND date=? AND meal=?').get(c.person_id,check.date,check.meal)) reason = 'already_scanned';
-      const row = { request_key: requestKey, card_id: c?.id || null, person_id: c?.person_id || null, tour_id: c?.tour_id || null, person_no: c?.person_no || null, date: check.date, meal: check.meal, reason, scanned_at: now().toISOString() };
-      db.prepare('INSERT INTO scan_logs(request_key,card_id,person_id,tour_id,person_no,date,meal,reason,scanned_at) VALUES(?,?,?,?,?,?,?,?,?)').run(...Object.values(row));
-      return row;
+      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), codeHash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0);
+      return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
+    const earlier = result.reason === 'already_scanned' ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;
     // A network replay can acknowledge a prior admission but must not show a fresh green gate.
-    res.json({ ...result, status: result.reason === 'admitted' && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
+    res.json({ ...result, replayed: !!result.replayed, firstScannedAt: earlier?.scanned_at || null, status: result.reason === 'admitted' && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
   });
   app.get('/api/logs', auth, (req, res) => {
     const { date = '', tour = '', status = '', office = '' } = req.query;
@@ -201,8 +221,9 @@ export function createApp(options = {}) {
   });
   app.get('/api/summary', auth, (req, res) => {
     const date = req.query.date || serviceAt(now()).date;
-    res.json(db.prepare(SUMMARY_SQL).get(date));
+    res.json({ ...db.prepare(SUMMARY_SQL).get(date), outside: outsideCounts(db.prepare(OUTSIDE_SQL).all(date)) });
   });
+  app.get('/api/summary/tours', auth, (req, res) => res.json(db.prepare(TOUR_REPORT_SQL).all(String(req.query.date || serviceAt(now()).date))));
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
   app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
   const archive = archiveSql(false), cutoff = value => { const today = serviceAt(now()).date; return archiveCutoff(value || today, today); };
