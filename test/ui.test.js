@@ -263,6 +263,29 @@ test('daily summary shows each meal and total; scanner status pauses in hidden t
  }finally{dom?.window.close();f.close();}
 });
 
+test('By tour groups offices, then sorts most scans first for the current Karbala meal on each refresh',async()=>{
+ const f=await fixture();let dom;try{
+ const clocks=['2026-10-21T04:00:00Z','2026-10-21T09:00:00Z','2026-10-21T16:22:00Z'];
+ // Tour IDs deliberately conflict with meal counts, and Zulu must stay below Alpha even with more scans.
+ for(const [tour_id,office,counts] of [['26/10','Alpha',[0,3,1]],['26/2','Alpha',[3,0,2]],['26/3','Alpha',[1,1,0]],['26/11','Alpha',[0,0,0]],['26/1','Zulu',[3,3,3]]]){
+  const t=await tour(f,3,{tour_id,office}),{cards}=await issue(f,t.id);
+  for(let meal=0;meal<clocks.length;meal++){
+   f.setTime(clocks[meal]);
+   for(const card of cards.slice(0,counts[meal]))assert.equal((await scan(f,card.token)).body.status,'green');
+  }
+ }
+ f.setTime(clocks[0]);dom=domFor(f,'/#summary');const w=dom.window,d=w.document;
+ const order=()=>[...d.querySelectorAll('#tourReport tbody tr')].map(row=>row.querySelector('strong').textContent);
+ const expected=[['26/2','26/3','26/10','26/11','26/1'],['26/10','26/3','26/2','26/11','26/1'],['26/2','26/10','26/3','26/11','26/1']];
+ for(let meal=0;meal<clocks.length;meal++){
+  if(meal){f.setTime(clocks[meal]);submit(w,d.querySelector('#summaryFilters'));}
+  await waitFor(()=>order().join(',')===expected[meal].join(','));
+  assert.match(d.querySelector('#tourReport p').textContent,new RegExp(`most ${['breakfast','lunch','dinner'][meal]} scans first`));
+ }
+ assert.equal(d.querySelector('[data-count=scans]').textContent,'20');
+ }finally{dom?.window.close();f.close();}
+});
+
 test('tours: Extend adds lunch or a whole day on the same cards, shows it on the row and keeps history',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,2);await issue(f,t.id);
