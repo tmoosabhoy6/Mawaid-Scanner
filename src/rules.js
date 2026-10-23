@@ -9,7 +9,7 @@ export function localTime(now = new Date()) {
   return { date: `${parts.year}-${parts.month}-${parts.day}`, minutes: +parts.hour * 60 + +parts.minute, seconds: +parts.second };
 }
 export const MEALS = [
-  { id: 'breakfast', label: 'Breakfast', start: 7 * 60, end: 8 * 60 + 30, hours: '7:00–8:30 am' },
+  { id: 'breakfast', label: 'Breakfast', start: 6 * 60, end: 8 * 60 + 30, hours: '6:00–8:30 am' },
   { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 15 * 60, hours: '11:00 am–3:00 pm' },
   { id: 'dinner', label: 'Dinner', start: 19 * 60 + 30, end: 20 * 60 + 30, hours: '7:30–8:30 pm' },
 ];

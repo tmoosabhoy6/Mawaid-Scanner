@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { fixture,tour,issue,scan } from './helpers.js';
 
-// Karbala is UTC+3: 04:00Z is breakfast, 09:00Z lunch, 16:30Z dinner, 03:30Z half an hour before breakfast.
+// Karbala is UTC+3: 04:00Z is breakfast, 09:00Z lunch, 16:30Z dinner, 02:30Z half an hour before breakfast.
 test('extend stay: lunch only or a whole day after departure, on the same cards, with history',async()=>{
  const f=await fixture();try{
  const t=await tour(f,2),{cards}=await issue(f,t.id),extend=body=>f.admin.post(`/api/tours/${t.id}/extensions`).send(body);
@@ -87,7 +87,7 @@ test('gate phones download current cards once, then only what changed',async()=>
 test('summary shows scans made outside meal hours beside the nearest meal, without counting them',async()=>{
  const f=await fixture();try{
  const t=await tour(f,3),{cards}=await issue(f,t.id);
- f.setTime('2026-10-21T03:30:00Z');for(const c of cards)await scan(f,c.token);await scan(f,cards[0].token);
+ f.setTime('2026-10-21T02:30:00Z');for(const c of cards)await scan(f,c.token);await scan(f,cards[0].token);
  f.setTime('2026-10-21T12:10:00Z');await scan(f,cards[2].token);
  f.setTime('2026-10-21T04:05:00Z');await scan(f,cards[0].token);
  const summary=(await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body;
