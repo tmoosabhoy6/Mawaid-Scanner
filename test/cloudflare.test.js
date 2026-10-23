@@ -115,10 +115,10 @@ test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and
  }finally{await f.close();}
 });
 
-test('Cloudflare: stay dates, roles and CSRF block admission; meal windows also block admission',async()=>{
+test('Cloudflare: stay dates, roles and CSRF block admission; every hour belongs to a meal',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);
- for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','outside_meal_time'],['2026-10-24T20:59:00Z','outside_meal_time'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
+ for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','admitted'],['2026-10-21T07:30:00Z','already_scanned'],['2026-10-21T15:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
  assert.equal((await f.call('/tours',undefined,'scanner')).status,401);
  assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner',{headers:{Origin:'https://other.test'}})).status,403);
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');

@@ -9,11 +9,12 @@ export function localTime(now = new Date()) {
   return { date: `${parts.year}-${parts.month}-${parts.day}`, minutes: +parts.hour * 60 + +parts.minute, seconds: +parts.second };
 }
 export const MEALS = [
-  { id: 'breakfast', label: 'Breakfast', start: 6 * 60, end: 8 * 60 + 30, hours: '6:00–8:30 am' },
-  { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 15 * 60, hours: '11:00 am–3:00 pm' },
-  { id: 'dinner', label: 'Dinner', start: 19 * 60 + 30, end: 20 * 60 + 30, hours: '7:30–8:30 pm' },
+  { id: 'breakfast', label: 'Breakfast', start: 0, end: 11 * 60, hours: 'until 11:00 am' },
+  { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 19 * 60 + 30, hours: '11:00 am–7:30 pm' },
+  { id: 'dinner', label: 'Dinner', start: 19 * 60 + 30, end: 24 * 60, hours: 'from 7:30 pm' },
 ];
-// Opening is inclusive; closing is exclusive (08:30:00 is already closed).
+// Meals cover the whole Karbala day: anything before lunch starts is breakfast, anything before dinner
+// starts is lunch, and the rest of the day is dinner. They only stop a second admission for the same meal.
 export function serviceAt(now) {
   const { date, minutes } = localTime(now);
   const meal = MEALS.find(m => minutes >= m.start && minutes < m.end);

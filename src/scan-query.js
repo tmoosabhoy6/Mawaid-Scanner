@@ -17,7 +17,7 @@ export const SCAN_SQL = `INSERT INTO scan_logs(request_key,card_id,person_id,tou
 export const FIRST_ADMISSION_SQL = 'SELECT scanned_at FROM admissions WHERE person_id=? AND date=? AND meal=?';
 export const SCAN_REASONS = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Stay has ended. The office can extend it on the Tours page.',
   replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour: 'Tour is no longer active in the source sheet',
-  outside_meal_time: 'Meal service is closed. Breakfast 6:00–8:30 am; lunch 11:00 am–3:00 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned: 'Already admitted for this meal today',
+  outside_meal_time: 'Meal service is closed.', already_scanned: 'Already admitted for this meal today',
   extension_other_meal: 'Stay extended for lunch only today', offline_declined: 'Turned away by a phone that was offline' };
 // Offline scans are accepted for up to two days, so a phone that lost its connection overnight can still send them.
 export const OFFLINE_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;

@@ -4,11 +4,8 @@ import { eligibility,localTime,serviceAt,validateTour,validateSafari } from '../
 const day='2026-10-21';
 const at=(h,m,s=0)=>new Date(Date.UTC(2026,9,21,h-3,m,s));
 const card={arrival:day,departure:day};
-test('meal windows use Karbala time, opening inclusive and closing exclusive',()=>{
- for(const [h,m,s] of [[5,59,59],[8,30,0],[10,59,59],[15,0,0],[19,29,59],[20,30,0],[23,59,59]]) {
-   assert.equal(eligibility(card,at(h,m,s)).reason,'outside_meal_time');assert.equal(serviceAt(at(h,m,s)).meal,null);
- }
- for(const [h,m,s,meal] of [[6,0,0,'breakfast'],[7,0,0,'breakfast'],[8,29,59,'breakfast'],[11,0,0,'lunch'],[13,30,0,'lunch'],[14,59,59,'lunch'],[19,30,0,'dinner'],[20,29,59,'dinner']]) {
+test('every Karbala time belongs to a meal: breakfast before 11:00, lunch before 19:30, then dinner',()=>{
+ for(const [h,m,s,meal] of [[3,0,0,'breakfast'],[6,0,0,'breakfast'],[8,30,0,'breakfast'],[10,59,59,'breakfast'],[11,0,0,'lunch'],[15,0,0,'lunch'],[19,29,59,'lunch'],[19,30,0,'dinner'],[20,30,0,'dinner'],[23,59,59,'dinner']]) {
    assert.equal(eligibility(card,at(h,m,s)).allowed,true);assert.equal(serviceAt(at(h,m,s)).meal,meal);
  }
 });
@@ -22,7 +19,7 @@ test('arrival/departure inclusive; before and after always red',()=>{
 test('Baghdad midnight differs from the UTC date',()=>{
  assert.equal(localTime(new Date('2026-10-20T21:00:00Z')).date,day);
  assert.equal(eligibility(card,new Date('2026-10-20T20:59:59Z')).reason,'before_arrival');
- assert.equal(eligibility(card,new Date('2026-10-21T20:59:59Z')).reason,'outside_meal_time');
+ assert.equal(eligibility(card,new Date('2026-10-21T20:59:59Z')).meal,'dinner');
  assert.equal(eligibility(card,new Date('2026-10-21T21:00:00Z')).reason,'after_departure');
 });
 test('reject impossible dates, reverse ranges, fractional/negative/excessive PAX',()=>{
