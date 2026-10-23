@@ -332,7 +332,7 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  // 0005 only adds the offline flag, which is 0 for every earlier scan.
  assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
- assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2,outside:{breakfast:0,lunch:0,dinner:0}});
+ assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
  assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
  }finally{await f.close();}
 });

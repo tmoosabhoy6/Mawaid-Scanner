@@ -84,15 +84,11 @@ test('gate phones download current cards once, then only what changed',async()=>
  }finally{f.close();}
 });
 
-test('summary shows scans made outside meal hours beside the nearest meal, without counting them',async()=>{
+test('tour report shows each meal against PAX',async()=>{
  const f=await fixture();try{
  const t=await tour(f,3),{cards}=await issue(f,t.id);
- f.setTime('2026-10-21T02:30:00Z');for(const c of cards)await scan(f,c.token);await scan(f,cards[0].token);
- f.setTime('2026-10-21T12:10:00Z');await scan(f,cards[2].token);
- f.setTime('2026-10-21T04:05:00Z');await scan(f,cards[0].token);
- const summary=(await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body;
- assert.equal(summary.breakfast,1);assert.deepEqual(summary.outside,{breakfast:2,lunch:1,dinner:0});
+ await scan(f,cards[0].token);await scan(f,cards[1].token);f.setTime('2026-10-21T09:00:00Z');await scan(f,cards[2].token);
  const report=(await f.admin.get('/api/summary/tours?date=2026-10-21').expect(200)).body;
- assert.deepEqual(report.map(r=>[r.tour_id,r.pax,r.breakfast,r.lunch,r.dinner,r.extension]),[['26/3205',3,1,0,0,null]]);
+ assert.deepEqual(report.map(r=>[r.tour_id,r.pax,r.breakfast,r.lunch,r.dinner,r.extension]),[['26/3205',3,2,1,0,null]]);
  }finally{f.close();}
 });

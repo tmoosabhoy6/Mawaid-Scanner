@@ -7,7 +7,7 @@ import { openDatabase, transaction } from './db.js';
 import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
-import { SUMMARY_SQL, OUTSIDE_SQL, outsideCounts, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
+import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
 import { offlineData } from './offline.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
@@ -221,7 +221,7 @@ export function createApp(options = {}) {
   });
   app.get('/api/summary', auth, (req, res) => {
     const date = req.query.date || serviceAt(now()).date;
-    res.json({ ...db.prepare(SUMMARY_SQL).get(date), outside: outsideCounts(db.prepare(OUTSIDE_SQL).all(date)) });
+    res.json(db.prepare(SUMMARY_SQL).get(date));
   });
   app.get('/api/summary/tours', auth, (req, res) => res.json(db.prepare(TOUR_REPORT_SQL).all(String(req.query.date || serviceAt(now()).date))));
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;

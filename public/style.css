@@ -210,7 +210,6 @@ tbody tr.printed-row td{background:rgba(214,64,82,.32)}tbody tr.printed-row:hove
 .extension-list button{min-height:40px;padding:6px 14px}
 .ext-chip{display:inline-block;margin-left:6px;padding:3px 9px;border-radius:999px;background:#173a4a;color:#9fdcf0;font-size:.8125rem;white-space:nowrap}
 /* Daily summary */
-.outside-note{display:block;margin-top:6px;color:#ffd98a;font-size:.875rem}
 .report td.meal b{font-size:1.0625rem;font-variant-numeric:tabular-nums}
 .report td.meal.full b{color:var(--green-text)}
 .report tfoot td{font-weight:600;border-top:1px solid var(--line)}

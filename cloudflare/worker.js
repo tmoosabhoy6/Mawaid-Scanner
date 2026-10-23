@@ -1,6 +1,6 @@
 import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
-import { SUMMARY_SQL, OUTSIDE_SQL, outsideCounts, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
+import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
@@ -157,7 +157,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
-  return json({...await first(db,SUMMARY_SQL,date),outside:outsideCounts(await all(db,OUTSIDE_SQL,date))});
+  return json(await first(db,SUMMARY_SQL,date));
  }
  if(path==='/api/summary/tours'&&method==='GET')return json(await all(db,TOUR_REPORT_SQL,url.searchParams.get('date')||serviceAt(clock()).date));
  if(path==='/api/settings'&&method==='GET'){
