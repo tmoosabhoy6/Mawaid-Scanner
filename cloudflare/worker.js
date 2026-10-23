@@ -7,7 +7,7 @@ import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, C
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
 const DEFAULT_SOURCE={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:[]};
-const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–1:30 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today'};
+const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–3:00 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today'};
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const json=(body,status=200,headers={})=>Response.json(body,{status,headers:{'Cache-Control':'no-store',...headers}});
 const stmt=(db,sql,...args)=>db.prepare(sql).bind(...args);

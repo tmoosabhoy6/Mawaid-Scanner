@@ -14,7 +14,7 @@ const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual
 const uid = () => randomUUID();
 const token = () => randomBytes(32).toString('base64url');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–1:30 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today' };
+const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–3:00 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today' };
 export function createApp(options = {}) {
   const config = { origin: process.env.APP_ORIGIN || 'http://localhost:3000',
     adminPassword: process.env.ADMIN_PASSWORD || '',

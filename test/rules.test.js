@@ -5,10 +5,10 @@ const day='2026-10-21';
 const at=(h,m,s=0)=>new Date(Date.UTC(2026,9,21,h-3,m,s));
 const card={arrival:day,departure:day};
 test('meal windows use Karbala time, opening inclusive and closing exclusive',()=>{
- for(const [h,m,s] of [[6,59,59],[8,30,0],[10,59,59],[13,30,0],[19,29,59],[20,30,0],[23,59,59]]) {
+ for(const [h,m,s] of [[6,59,59],[8,30,0],[10,59,59],[15,0,0],[19,29,59],[20,30,0],[23,59,59]]) {
    assert.equal(eligibility(card,at(h,m,s)).reason,'outside_meal_time');assert.equal(serviceAt(at(h,m,s)).meal,null);
  }
- for(const [h,m,s,meal] of [[7,0,0,'breakfast'],[8,29,59,'breakfast'],[11,0,0,'lunch'],[13,29,59,'lunch'],[19,30,0,'dinner'],[20,29,59,'dinner']]) {
+ for(const [h,m,s,meal] of [[7,0,0,'breakfast'],[8,29,59,'breakfast'],[11,0,0,'lunch'],[13,30,0,'lunch'],[14,59,59,'lunch'],[19,30,0,'dinner'],[20,29,59,'dinner']]) {
    assert.equal(eligibility(card,at(h,m,s)).allowed,true);assert.equal(serviceAt(at(h,m,s)).meal,meal);
  }
 });
