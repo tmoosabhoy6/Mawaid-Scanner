@@ -1,19 +1,30 @@
 export const TIME_ZONE = 'Asia/Baghdad';
 export const START_DATE = '2026-10-21';
+const localClock = new Intl.DateTimeFormat('en-CA', {
+  timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+});
 export function localTime(now = new Date()) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
-    timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-  }).formatToParts(now).map(p => [p.type, p.value]));
+  const parts = Object.fromEntries(localClock.formatToParts(now).map(p => [p.type, p.value]));
   return { date: `${parts.year}-${parts.month}-${parts.day}`, minutes: +parts.hour * 60 + +parts.minute, seconds: +parts.second };
 }
-// Scanning has no meal times: a card is green on any day of its stay, at any hour.
-export function serviceAt(now) { return { date: localTime(now).date }; }
+export const MEALS = [
+  { id: 'breakfast', label: 'Breakfast', start: 7 * 60, end: 8 * 60 + 30, hours: '7:00–8:30 am' },
+  { id: 'lunch', label: 'Lunch', start: 11 * 60, end: 13 * 60 + 30, hours: '11:00 am–1:30 pm' },
+  { id: 'dinner', label: 'Dinner', start: 19 * 60 + 30, end: 20 * 60 + 30, hours: '7:30–8:30 pm' },
+];
+// Opening is inclusive; closing is exclusive (08:30:00 is already closed).
+export function serviceAt(now) {
+  const { date, minutes } = localTime(now);
+  const meal = MEALS.find(m => minutes >= m.start && minutes < m.end);
+  return { date, meal: meal?.id || null, mealLabel: meal?.label || null, meals: MEALS };
+}
 export function eligibility(card, now) {
   const service = serviceAt(now);
   if (!card || card.revoked_at) return { allowed: false, reason: card ? 'replaced_card' : 'unknown_card', ...service };
   if (service.date < card.arrival) return { allowed: false, reason: 'before_arrival', ...service };
   if (service.date > card.departure) return { allowed: false, reason: 'after_departure', ...service };
+  if (!service.meal) return { allowed: false, reason: 'outside_meal_time', ...service };
   return { allowed: true, reason: 'admitted', ...service };
 }
 export function validDate(value) {

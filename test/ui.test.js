@@ -10,6 +10,7 @@ async function waitFor(fn){for(let n=0;n<200;n++){if(fn())return;await new Promi
 function domFor(f,path='/',{signedIn=true}={}){
  const dom=new JSDOM(html,{url:'http://localhost:3000'+path,runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window;
+ w.Date=class extends Date{constructor(...args){super(...(args.length?args:[f.getTime()]));}};
  w.fetch=async(url,options={})=>{
   const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;
   const agent=!signedIn||path.startsWith('/api/scan')||path==='/api/service'?f.scanner:f.admin;
@@ -24,7 +25,7 @@ function domFor(f,path='/',{signedIn=true}={}){
  w.eval(js);return dom;
 }
 function submit(w,form,button){form.dispatchEvent(new w.SubmitEvent('submit',{bubbles:true,cancelable:true,submitter:button}));}
-const karbalaToday=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Baghdad'}).format(new Date());
+const karbalaToday=()=> '2026-10-21';
 // The Tours page opens on today's arrivals; once its first load has finished, clear the date to list every tour.
 async function allDates(w,d){
  await waitFor(()=>d.querySelector('#tourCount')&&d.querySelector('#tourCount').textContent!=='Loading…');
@@ -81,28 +82,28 @@ test('signed out, / asks for the administrator password only',async()=>{
  assert.equal(d.querySelector('#loginForm select'),null);assert.match(d.querySelector('#loginForm').textContent,/Administrator password/);
  }finally{dom?.window.close();f.close();}
 });
-test('scanner: valid QR green on every scan at any hour, unknown red, no yellow state',async()=>{
+test('scanner: valid QR green once per meal, unknown red, no yellow state',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T06:00:00Z');// 9 am Karbala: once between meals.
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T04:00:00Z');// Breakfast in Karbala.
  dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
  assert.equal(d.querySelector('#loginForm'),null);assert.doesNotMatch(d.body.textContent,/Sign (in|out)|Back to printing system/);
- assert.equal(d.querySelector('#manualSubmit').disabled,false);assert.equal(d.querySelector('.meal-strip'),null);assert.doesNotMatch(d.body.textContent,/closed/i);
+ assert.equal(d.querySelector('#manualSubmit').disabled,false);assert.equal(d.querySelector('.meal-strip'),null);assert.match(d.querySelector('#scanResult').textContent,/Breakfast/);
  const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode');
  input.value=`MW1:${cards[0].token}`;submit(w,form);await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
  assert.equal(d.querySelector('#scanResult strong').textContent,'ALLOW');
  await new Promise(r=>setTimeout(r,3100));d.querySelector('#scanResult').className='scan-result';input.value=`MW1:${cards[0].token}`;submit(w,form);
- await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));assert.match(d.querySelector('#scanResult').textContent,/Already admitted/);
  await new Promise(r=>setTimeout(r,1400));input.value='MW1:unknown';submit(w,form);
  await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));assert.match(d.querySelector('#scanResult').textContent,/not recognised/);
  assert.equal(d.querySelector('[class*=yellow]'),null);
- assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").get().n,2);
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").get().n,1);
  }finally{dom?.window.close();f.close();}
 });
 
-test('scanner camera checks cards at any hour and toggles on and off',async()=>{
+test('scanner camera checks cards during meals and toggles on and off',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T20:00:00Z');// 11 pm Karbala.
+ const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T16:30:00Z');// Dinner in Karbala.
  dom=new JSDOM(html,{url:'https://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
  const w=dom.window,d=w.document;let decode,stopped=0;
  w.fetch=async(url,options={})=>{const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;let req=options.method==='POST'?f.scanner.post(path):f.scanner.get(path);if(options.body)req=req.send(JSON.parse(options.body));const r=await req;return{ok:r.status<300,status:r.status,json:async()=>r.body};};
@@ -165,8 +166,7 @@ function fakeFolder(name){
 async function archiveFixture(){
  const f=await fixture();const t=await tour(f,2),{cards}=await issue(f,t.id);
  await scan(f,cards[0].token);
- // A per-meal admission recorded before meal times were removed is still archived.
- f.db.prepare("INSERT INTO admissions VALUES(?,'2026-10-21','breakfast',?,'2026-10-21T04:00:00Z')").run(cards[0].person_id,cards[0].id);await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
+ await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
  return f;
 }
 async function startArchive(w,d){
@@ -190,7 +190,7 @@ test('archive & clear saves CSV folders inside Mawaid Archive, then clears only 
  assert.ok(![...archive.files.keys()].some(n=>n.endsWith('.pdf')));
  assert.match(d.querySelector('#archiveProgress').textContent,/2 scan records, 1 meals served/);
  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE date<'2026-10-22'").get().n,0);
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,1);
  // A second archive in the same minute gets its own folder.
  await waitFor(()=>!d.querySelector('#archiveClear').disabled);
  submit(w,d.querySelector('#clearForm'),d.querySelector('#archiveClear'));
@@ -238,5 +238,26 @@ test('tours: Show and Sort by dropdowns reload the list; Safari cards sort along
  d.querySelector('#tourFilters').reset();
  assert.equal(d.querySelector('[name=arrival]').value,karbalaToday());assert.equal(d.querySelector('[name=sort]').value,'newest');
  await allDates(w,d);await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
+ }finally{dom?.window.close();f.close();}
+});
+
+test('daily summary shows each meal and total; scanner status pauses in hidden tabs',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,1),{cards}=await issue(f,t.id);
+ for(const time of ['2026-10-21T04:00:00Z','2026-10-21T09:00:00Z','2026-10-21T16:30:00Z']){f.setTime(time);await scan(f,cards[0].token);}
+ dom=domFor(f,'/#summary');const w=dom.window,d=w.document;
+ await waitFor(()=>d.querySelector('[data-count=dinner]'));
+ for(const meal of ['breakfast','lunch','dinner'])assert.equal(d.querySelector(`[data-count=${meal}]`).textContent,'1');
+ assert.equal(d.querySelector('[data-count=scans]').textContent,'3');assert.doesNotMatch(d.querySelector('#summaryContent').textContent,/people staying|tour/i);
+ dom.window.close();dom=undefined;
+ // Capture the timer callback instead of waiting a minute.
+ dom=new JSDOM(html,{url:'http://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
+ const phone=dom.window;let tick,interval,statusRequests=0,hidden=false;
+ Object.defineProperty(phone.document,'hidden',{get:()=>hidden});
+ phone.setInterval=(fn,ms)=>{tick=fn;interval=ms;return 1;};phone.clearInterval=()=>{};
+ phone.fetch=async(url)=>{if(url==='/api/service')statusRequests++;return{ok:true,json:async()=>({date:'2026-10-21',meal:'dinner',mealLabel:'Dinner'})};};
+ phone.eval(js);await waitFor(()=>tick);assert.equal(interval,60000);assert.equal(statusRequests,1);
+ hidden=true;await tick();assert.equal(statusRequests,1);
+ hidden=false;phone.document.dispatchEvent(new phone.Event('visibilitychange'));await waitFor(()=>statusRequests===2);
  }finally{dom?.window.close();f.close();}
 });

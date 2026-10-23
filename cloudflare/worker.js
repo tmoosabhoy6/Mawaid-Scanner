@@ -1,12 +1,13 @@
 import { serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { SCAN_SQL } from '../src/scan-query.js';
 import { SUMMARY_SQL } from '../src/summary.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
-import { listOrder, tourStatus, safariStatus } from '../src/tour-list.js';
+import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
 const DEFAULT_SOURCE={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',dailyTimes:[]};
-const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet'};
+const reasons={admitted:'Welcome — meal allowed',before_arrival:'Arrival date has not started',after_departure:'Departure date has passed',replaced_card:'This card was replaced',unknown_card:'Card not recognised',over_capacity:'Person exceeds the current tour PAX',inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–1:30 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today'};
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const json=(body,status=200,headers={})=>Response.json(body,{status,headers:{'Cache-Control':'no-store',...headers}});
 const stmt=(db,sql,...args)=>db.prepare(sql).bind(...args);
@@ -75,9 +76,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/tours'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase(),sort=url.searchParams.get('sort')||'',status=url.searchParams.get('status')||'';
-  return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
-   (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM tours t WHERE t.active=1 AND ${tourStatus(status)} AND (?='' OR t.arrival=?) AND (?='' OR instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0) ORDER BY ${listOrder(sort,'t.')} LIMIT 1000) x ORDER BY ${listOrder(sort,'x.')}`,arrival,arrival,q,q,q,q));
+  const query=tourList({arrival,q,sort,status});return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
@@ -87,9 +86,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  // Safari cards print without a QR code, so they have no people, cards or scans.
  if(path==='/api/safaris'&&method==='GET'){
   const arrival=url.searchParams.get('arrival')||'',q=(url.searchParams.get('q')||'').slice(0,150).toLowerCase(),sort=url.searchParams.get('sort')||'',status=url.searchParams.get('status')||'';
-  return json(await all(db,`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
-   (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-   FROM safaris s WHERE ${safariStatus(status)} AND (?='' OR arrival=?) AND (?='' OR instr(lower(tour_id),?)>0 OR instr(lower(office),?)>0 OR instr(lower(its),?)>0) ORDER BY ${listOrder(sort,'s.')},s.created_at LIMIT 1000) x ORDER BY ${listOrder(sort,'x.')},x.created_at`,arrival,arrival,q,q,q,q));
+  const query=safariList({arrival,q,sort,status});return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/safaris'&&method==='POST'){
   let s;try{s=validateSafari(await boundedBody(request,8192));}catch(e){throw fail(e.message);}
@@ -113,7 +110,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  const people=path.match(/^\/api\/tours\/([\w-]+)\/people$/);
  if(people&&method==='GET')return json(await all(db,'SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no',people[1]));
  if(path==='/api/labels'&&method==='POST')return issueLabels(db,await boundedBody(request,100000),env,stamp);
- if(path==='/api/batches'&&method==='GET')return json(await all(db,`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`));
+ if(path==='/api/batches'&&method==='GET')return json(await all(db,BATCH_LIST_SQL));
  const batchPath=path.match(/^\/api\/batches\/([\w-]+)\/(pdf|manifest|status)$/);
  if(batchPath){
   const [,id,action]=batchPath;
@@ -137,11 +134,11 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/logs'&&method==='GET'){
   const get=k=>(url.searchParams.get(k)||'').slice(0,160),date=get('date'),tour=get('tour').toLowerCase(),office=get('office').toLowerCase(),status=get('status');
-  return json(await all(db,`SELECT s.*,t.tour_id AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id WHERE (?='' OR s.date=?) AND (?='' OR instr(lower(t.tour_id),?)>0) AND (?='' OR instr(lower(t.office),?)>0) AND (?='' OR (?='green' AND s.reason='admitted') OR (?='red' AND s.reason!='admitted')) ORDER BY s.id DESC LIMIT 1000`,date,date,tour,tour,office,office,status,status,status));
+  const query=scanLogQuery({date,tour,office,status});return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
-  return json(await all(db,SUMMARY_SQL,date));
+  return json(await first(db,SUMMARY_SQL,date));
  }
  if(path==='/api/settings'&&method==='GET'){
   const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
@@ -171,15 +168,8 @@ async function scan(db,body,now){
  if(!keyValid(body.requestKey))throw fail('A scan request key is required.');
  if(typeof body.code!=='string'||body.code.length>300)throw fail('Invalid QR code.');
  const service=serviceAt(now),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
- // Green means a recognised card inside its stay dates; repeat scans are not limited by meal, so meal is NULL.
- // OR IGNORE also covers databases still carrying migration 0001's per-meal admissions trigger: its insert is skipped.
- const row=await first(db,`INSERT OR IGNORE INTO scan_logs(request_key,card_id,person_id,tour_id,person_no,date,meal,reason,scanned_at)
- SELECT ?1,c.id,p.id,t.id,p.person_no,?2,NULL,
- CASE WHEN c.id IS NULL THEN 'unknown_card' WHEN t.active=0 THEN 'inactive_tour' WHEN c.revoked_at IS NOT NULL THEN 'replaced_card'
- WHEN ?2<t.arrival THEN 'before_arrival' WHEN ?2>t.departure THEN 'after_departure'
- WHEN p.person_no>t.pax THEN 'over_capacity' ELSE 'admitted' END,?3
- FROM (SELECT 1) LEFT JOIN cards c ON c.token_hash=?4 LEFT JOIN people p ON p.id=c.person_id LEFT JOIN tours t ON t.id=p.tour_id
- RETURNING *`,body.requestKey,service.date,now.toISOString(),codeHash);
+ // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
+ const row=await first(db,SCAN_SQL,body.requestKey,service.date,now.toISOString(),codeHash,service.meal);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
  const replayed=!row;
  return json({...result,replayed,status:result.reason==='admitted'&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
@@ -233,7 +223,7 @@ async function clearArchived(db,body,now){
  if(usage.used+CLEANUP_CHUNK_WRITES>usage.limit)throw fail('Today’s clean-up allowance is used up, so scanning keeps its share of the free plan. Continue after 3:00 am Karbala time.',429);
  const sql=archiveSql(true);
  const results=await db.batch([stmt(db,sql.clearScans,before),stmt(db,sql.clearMeals,before),stmt(db,sql.clearPdfs,before)]);
- const deleted={scans:results[0].meta?.changes||0,meals:results[1].meta?.changes||0,pdfs:results[2].meta?.changes||0};
+ const deleted={scans:results[0].results.length,meals:results[1].meta?.changes||0,pdfs:results[2].meta?.changes||0};
  const written=results.reduce((sum,r)=>sum+Math.max(r.meta?.rows_written||0,r.meta?.changes||0),0);
  const used=usage.used+written+1;
  await settingStmt(db,'cleanupUsage',{day:usage.day,rowsWritten:used}).run();
@@ -245,15 +235,19 @@ async function syncTours(db,body,stamp){
  if(!Array.isArray(body.tours)||body.tours.length>10000)throw fail('Invalid tours payload.');
  let tours;try{tours=body.tours.map(t=>validateTour(t)).filter(t=>t.departure>=START_DATE);}catch(e){throw fail(e.message);}
  const keys=tours.map(t=>`${t.tour_id}|${t.arrival}`);if(new Set(keys).size!==keys.length)throw fail('Duplicate tour stays in source.');
+ const snapshot=await hash(JSON.stringify({source:[source.spreadsheetId,source.tab],tours:[...tours].sort((a,b)=>a.tour_id.localeCompare(b.tour_id)||a.arrival.localeCompare(b.arrival))}));
+ const previous=await getSetting(db,'sync',null);
+ const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],warnings:Array.isArray(body.warnings)?body.warnings.map(String).slice(0,30):[]};
+ if(previous?.snapshot===snapshot){await settingStmt(db,'sync',sync).run();return json({ok:true,count:tours.length,changedTours:0});}
  const data=JSON.stringify(tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`})));
  // An unchanged snapshot does not touch any tour row. Both update statements are conditional.
  const results=await db.batch([
- stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND NOT EXISTS(SELECT 1 FROM json_each(?) j WHERE json_extract(j.value,'$.tour_id')=tours.tour_id AND json_extract(j.value,'$.arrival')=tours.arrival)`,data),
+ stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN(SELECT json_extract(value,'$.source_key') FROM json_each(?)))`,data),
  stmt(db,`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active)
  SELECT json_extract(value,'$.id'),json_extract(value,'$.tour_id'),json_extract(value,'$.office'),json_extract(value,'$.arrival'),json_extract(value,'$.departure'),json_extract(value,'$.pax'),'sheets',json_extract(value,'$.source_key'),?,1 FROM json_each(?) WHERE 1
  ON CONFLICT(tour_id,arrival) DO UPDATE SET office=excluded.office,departure=excluded.departure,pax=excluded.pax,source=excluded.source,source_key=excluded.source_key,active=1
  WHERE tours.office<>excluded.office OR tours.departure<>excluded.departure OR tours.pax<>excluded.pax OR tours.source<>'sheets' OR tours.source_key IS NOT excluded.source_key OR tours.active<>1`,stamp,data),
- settingStmt(db,'sync',{lastSuccess:stamp,imported:tours.length,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],warnings:Array.isArray(body.warnings)?body.warnings.map(String).slice(0,30):[]})]);
+ settingStmt(db,'sync',sync)]);
  return json({ok:true,count:tours.length,changedTours:(results[0].meta?.changes||0)+(results[1].meta?.changes||0)});
 }
 export async function respond(request,env,clock){

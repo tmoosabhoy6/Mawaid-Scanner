@@ -10,7 +10,7 @@ import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -50,12 +50,12 @@ test('Cloudflare: only the administrator signs in; the scanner works without a s
  }finally{await f.close();}
 });
 
-test('Cloudflare: four phones scanning one valid card all see green; a replayed request stays red',async()=>{
+test('Cloudflare: four phones scanning one card produce exactly one green; a replayed request stays red',async()=>{
  const f=await fixture();try{
  const t=await f.tour(4),b=await f.issue(t.id);
  const scans=await Promise.all(Array.from({length:4},()=>f.scan(b.cards[0].token)));
- assert.equal(scans.filter(r=>r.data.status==='green').length,4);assert.ok(scans.every(r=>r.data.meal===null));
- assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,0);
+ assert.equal(scans.filter(r=>r.data.status==='green').length,1);assert.ok(scans.every(r=>r.data.meal==='breakfast'));
+ assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,1);
  const replayKey=randomUUID();const accepted=await f.scan(b.cards[1].token,replayKey);assert.equal(accepted.data.status,'green');
  const retry=await f.scan(b.cards[1].token,replayKey);assert.equal(retry.data.status,'red');assert.equal(retry.data.replayed,true);
  f.setTime('2026-10-21T09:30:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
@@ -70,7 +70,7 @@ test('Cloudflare: replacement revokes old codes; retries reuse tokens',async()=>
  await f.scan(b.cards[0].token);
  const replace=await f.call('/labels',{personIds:b.cards.map(c=>c.person_id),expectedCardIds:Object.fromEntries(b.cards.map(c=>[c.person_id,c.id])),requestKey:randomUUID()});assert.equal(replace.status,201);
  for(const c of b.cards)assert.equal((await f.scan(c.token)).data.reason,'replaced_card');
- assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[0].person_id).token)).data.status,'green');
+ assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[0].person_id).token)).data.reason,'already_scanned');
  assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[1].person_id).token)).data.status,'green');
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM people').first()).n,2);
  }finally{await f.close();}
@@ -115,10 +115,10 @@ test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and
  }finally{await f.close();}
 });
 
-test('Cloudflare: stay dates, roles and CSRF block admission; any hour of a stay date is green',async()=>{
+test('Cloudflare: stay dates, roles and CSRF block admission; meal windows also block admission',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);
- for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
+ for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','outside_meal_time'],['2026-10-24T20:59:00Z','outside_meal_time'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
  assert.equal((await f.call('/tours',undefined,'scanner')).status,401);
  assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner',{headers:{Origin:'https://other.test'}})).status,403);
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
@@ -131,18 +131,16 @@ test('Cloudflare: archive pages records, clears in bounded chunks and respects t
  const pdf=await makeLabels(b.cards,b.printer);
  assert.equal((await f.mf.dispatchFetch(`https://mawayid.test/api/batches/${b.id}/pdf`,{method:'POST',headers:{Cookie:f.cookies.admin,'Content-Type':'application/pdf'},body:pdf})).status,200);
  for(const c of b.cards)assert.equal((await f.scan(c.token)).data.status,'green');
- // Per-meal admissions are no longer written; one recorded before the change is still archived and cleared.
- await f.db.prepare("INSERT INTO admissions VALUES(?,'2026-10-21','lunch',?,'2026-10-21T10:00:00Z')").bind(b.cards[0].person_id,b.cards[0].id).run();
  f.setTime('2026-10-22T04:00:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
  const status=await f.call('/archive?before=2026-10-22');assert.equal(status.status,200);
- assert.deepEqual(status.data.counts,{scans:2,meals:1,pdfs:0});assert.equal(status.data.cleanup.limit,40000);assert.equal(status.data.cleanup.used,0);
+ assert.deepEqual(status.data.counts,{scans:2,meals:2,pdfs:0});assert.equal(status.data.cleanup.limit,40000);assert.equal(status.data.cleanup.used,0);
  assert.equal((await f.call('/archive?before=2026-10-23')).status,400);assert.equal((await f.call('/archive/clear',{before:''})).status,400);assert.equal((await f.call('/archive/clear',{})).status,400);assert.equal((await f.call('/archive',undefined,'scanner')).status,401);
  const page=await f.call('/archive/scans?before=2026-10-22&limit=1');assert.equal(page.data.rows.length,1);assert.ok(page.data.next);
  assert.equal((await f.call(`/archive/scans?before=2026-10-22&after=${page.data.next}`)).data.rows.length,1);
- assert.equal((await f.call('/archive/meals?before=2026-10-22')).data.rows.length,1);
+ assert.equal((await f.call('/archive/meals?before=2026-10-22')).data.rows.length,2);
  assert.equal((await f.call('/archive/prints?before=2026-10-22')).data.rows[0].labels,2);
  const cleared=await f.call('/archive/clear',{before:'2026-10-22'});assert.equal(cleared.status,200,JSON.stringify(cleared.data));
- assert.deepEqual(cleared.data.deleted,{scans:2,meals:1,pdfs:0});assert.equal(cleared.data.done,true);assert.ok(cleared.data.cleanup.used>=3);
+ assert.deepEqual(cleared.data.deleted,{scans:2,meals:2,pdfs:0});assert.equal(cleared.data.done,true);assert.ok(cleared.data.cleanup.used>=3);
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,1);
  f.setTime('2026-10-25T04:00:00Z');
  assert.equal((await f.call('/archive/clear',{before:'2026-10-25'})).data.deleted.pdfs,1);
@@ -160,12 +158,12 @@ test('Cloudflare capacity: 2,000 people, 6,000 green scans, four concurrent phon
  for(let n=0;n<20;n++){const batch=await f.issue(tour.id);assert.equal(batch.cards.length,100);cards.push(...batch.cards);assert.equal(batch.remaining,2000-cards.length);}
  assert.equal(new Set(cards.map(c=>c.token)).size,2000);
  const started=performance.now();
- for(const time of ['2026-10-21T04:00:00Z','2026-10-21T09:30:00Z','2026-10-21T16:00:00Z']){
+ for(const time of ['2026-10-21T04:00:00Z','2026-10-21T09:30:00Z','2026-10-21T16:30:00Z']){
  f.setTime(time);
  let next=0;await Promise.all(Array.from({length:4},async()=>{while(next<cards.length){const c=cards[next++];assert.equal((await f.scan(c.token)).data.status,'green');}}));
  }
  assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").first()).n,6000);
- const summary=(await f.call('/summary?date=2026-10-21')).data[0];assert.equal(summary.people,2000);assert.equal(summary.scans,6000);
+ const summary=(await f.call('/summary?date=2026-10-21')).data;assert.equal(summary.breakfast,2000);assert.equal(summary.lunch,2000);assert.equal(summary.dinner,2000);assert.equal(summary.scans,6000);
  t.diagnostic(`6,000 scans completed in ${((performance.now()-started)/1000).toFixed(1)} seconds in the local Cloudflare runtime; this excludes real network latency.`);
  }finally{await f.close();}
 });
@@ -176,7 +174,7 @@ test('Cloudflare UI: failed PDF upload recovers the same cards through Print log
  try{
  await f.tour(1);
  dom=new JSDOM(readFileSync('public/index.html','utf8'),{url:'https://mawayid.test',runScripts:'outside-only',pretendToBeVisual:true});
- const w=dom.window,d=w.document;let failUpload=true;
+ const w=dom.window,d=w.document;w.Date=class extends Date{constructor(...args){super(...(args.length?args:['2026-10-21T04:00:00Z']));}};let failUpload=true;
  w.fetch=async(path,options={})=>{
   if(options.headers?.['Content-Type']==='application/pdf'&&failUpload){failUpload=false;return Response.json({error:'Test interrupted upload'},{status:503});}
   return f.mf.dispatchFetch(new URL(path,w.location.href).href,{...options,headers:{...options.headers,Cookie:f.cookies.admin,'X-Test-Time':'2026-10-21T04:00:00Z'}});
@@ -231,14 +229,14 @@ test('Cloudflare: migration 0002 keeps every tour, person, card and admission of
  }finally{await f.close();}
 });
 
-test('Cloudflare: scanning works before migration 0002 is applied, without per-meal limits',async()=>{
+test('Cloudflare: original-schema scanning still enforces the meal admission trigger',async()=>{
  const f=await fixture({},MIGRATIONS.slice(0,1));try{
  const token='T'.repeat(43),digest=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))).toString('base64');
  await f.db.batch([`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('t1','26/1','A','2026-10-21','2026-10-24',1,'x')`,`INSERT INTO people VALUES('p1','t1',1)`,
   `INSERT INTO batches(id,created_at,kind,request_key) VALUES('b1','x','initial','k1')`,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES('c1','p1','b1','${digest}','x')`].map(sql=>f.db.prepare(sql)));
- for(let n=0;n<3;n++)assert.equal((await f.scan(token)).data.status,'green');
+ assert.equal((await f.scan(token)).data.status,'green');for(let n=0;n<2;n++)assert.equal((await f.scan(token)).data.reason,'already_scanned');
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
- assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,4);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,0);
+ assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,4);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,1);
  }finally{await f.close();}
 });
 
@@ -275,5 +273,55 @@ test('Cloudflare: tours list keeps finished stays; Show and Sort by apply before
  assert.equal(saved.status,201);
  const safaris=async query=>(await f.call(`/safaris?${new URLSearchParams(query)}`)).data.map(s=>s.office);
  assert.deepEqual(await safaris({}),['B','A','C']);assert.deepEqual(await safaris({status:'printed'}),['A']);assert.deepEqual(await safaris({status:'unprinted',sort:'oldest'}),['B','C']);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: large history keeps scan and summary costs bounded; tour reads grow linearly',async(t)=>{
+ const {tourList,scanLogQuery}=await import('../src/list-queries.js');
+ const {SUMMARY_SQL}=await import('../src/summary.js');
+ const {SCAN_SQL}=await import('../src/scan-query.js');
+ const f=await fixture();try{
+ const tours=Array.from({length:500},(_,i)=>({id:`large-t${i}`,tour_id:`large-${i}`}));
+ await f.db.prepare(`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at)
+ SELECT json_extract(value,'$.id'),json_extract(value,'$.tour_id'),'Load test','2026-10-21','2026-10-24',20,'x' FROM json_each(?)`).bind(JSON.stringify(tours)).run();
+ await f.db.prepare("INSERT INTO batches(id,created_at,kind,request_key) VALUES('large-b','x','initial','large-b')").run();
+ for(let chunk=0;chunk<20;chunk++){
+  const people=Array.from({length:500},(_,n)=>{const i=chunk*500+n;return{id:`large-p${i}`,tour:`large-t${Math.floor(i/20)}`,n:i%20+1};});
+  await f.db.prepare(`INSERT INTO people SELECT json_extract(value,'$.id'),json_extract(value,'$.tour'),json_extract(value,'$.n') FROM json_each(?)`).bind(JSON.stringify(people)).run();
+  await f.db.prepare(`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.id'),'large-b',json_extract(value,'$.id'),'x' FROM json_each(?)`).bind(JSON.stringify(people)).run();
+ }
+ await f.db.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
+ INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
+ const scans=[];
+ for(const [key,meal] of [['load-first','breakfast'],['load-duplicate','breakfast'],['load-lunch','lunch'],['load-dinner','dinner']]) {
+   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal).all();
+   assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
+   assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
+ }
+ const query=tourList(),list=await f.db.prepare(query.sql).all();
+ assert.equal(list.results.length,500);assert.ok(list.meta.rows_read<150000,JSON.stringify(list.meta));
+ const summary=await f.db.prepare(SUMMARY_SQL).bind('2026-10-21').all();
+ assert.deepEqual(summary.results[0],{date:'2026-10-21',breakfast:1,lunch:1,dinner:1,other:0,scans:3});assert.ok(summary.meta.rows_read<=2);
+ const logs=scanLogQuery({date:'2026-10-21'}),recent=await f.db.prepare(logs.sql).bind(...logs.params).all();assert.equal(recent.results.length,4);assert.ok(recent.meta.rows_read<40);
+ // A date without a counter still returns zeroes. Deleting old logs updates their stored totals.
+ assert.equal((await f.call('/summary?date=2026-10-19')).data.scans,0);
+ await f.db.prepare("DELETE FROM scan_logs WHERE date='2026-10-21'").run();assert.equal((await f.call('/summary?date=2026-10-21')).data.scans,0);
+ // Public status checks are safe even if the database binding would throw on any I/O.
+ const {respond}=await import('../cloudflare/worker.js');
+ const status=await respond(new Request('https://mawayid.test/api/service'),{...config,DB:{prepare(){throw Error('Unexpected D1 read');}}},()=>new Date('2026-10-21T04:00:00Z'));
+ assert.equal(status.status,200);assert.equal((await status.json()).meal,'breakfast');
+ t.diagnostic(JSON.stringify({dataset:{tours:500,cards:10000,old_scans:20000},tour_rows_read:list.meta.rows_read,summary_rows_read:summary.meta.rows_read,scans:scans.map(m=>({read:m.rows_read,written:m.rows_written}))}));
+ }finally{await f.close();}
+});
+
+test('Cloudflare: migration backfills legacy scans without altering logs or meal history',async()=>{
+ const f=await fixture({},MIGRATIONS.slice(0,3));try{
+ await f.db.prepare(`INSERT INTO scan_logs(request_key,date,meal,reason,scanned_at) VALUES('legacy1','2026-10-20',NULL,'admitted','x'),('legacy2','2026-10-20',NULL,'admitted','x'),('declined','2026-10-20',NULL,'unknown_card','x')`).run();
+ const before=(await f.db.prepare('SELECT * FROM scan_logs').all()).results;
+ await f.db.batch(statements(MIGRATIONS[3]).map(sql=>f.db.prepare(sql)));
+ assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before);
+ const counts=(await f.call('/summary?date=2026-10-20')).data;
+ assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
+ assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
  }finally{await f.close();}
 });

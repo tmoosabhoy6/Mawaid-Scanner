@@ -24,7 +24,7 @@ test('server restart preserves cards, PDFs, sessions and scan history',async()=>
  assert.equal((await agent.post('/api/scan').send({code,requestKey:randomUUID()})).body.status,'green');
  app.locals.db.close();app=createApp(options);agent=request.agent(app);
  await agent.post('/api/login').send({password:config.adminPassword}).expect(200);
- const again=await agent.post('/api/scan').send({code,requestKey:randomUUID()}).expect(200);assert.equal(again.body.status,'green');assert.equal(app.locals.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,2);
+ const again=await agent.post('/api/scan').send({code,requestKey:randomUUID()}).expect(200);assert.equal(again.body.reason,'already_scanned');assert.equal(app.locals.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,2);
  const pdf=await agent.get(`/api/batches/${batch.body.id}/pdf`).expect(200);assert.ok(pdf.body.length>1000);
  assert.equal(app.locals.db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n,2);
  }finally{if(app)app.locals.db.close();rmSync(dataDir,{recursive:true,force:true});}

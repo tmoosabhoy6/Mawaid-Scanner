@@ -1,4 +1,7 @@
-// Daily summary shared by the Node server and the Cloudflare Worker: green scans per tour on one Karbala date (?1).
-export const SUMMARY_SQL = `SELECT t.id,t.tour_id,t.office,t.pax,COUNT(s.id) AS scans,COUNT(DISTINCT s.person_no) AS people
-  FROM tours t LEFT JOIN scan_logs s ON s.tour_id=t.id AND s.date=?1 AND s.reason='admitted'
-  WHERE t.active=1 AND t.arrival<=?1 AND t.departure>=?1 GROUP BY t.id ORDER BY t.tour_id`;
+// One indexed row per date, maintained in the same transaction as the scan log.
+// Historical scans without a meal remain visible without inventing a meal assignment.
+export const SUMMARY_SQL = `SELECT ?1 AS date,
+  COALESCE(d.breakfast,0) AS breakfast,COALESCE(d.lunch,0) AS lunch,COALESCE(d.dinner,0) AS dinner,
+  COALESCE(d.other,0) AS other,
+  COALESCE(d.breakfast+d.lunch+d.dinner+d.other,0) AS scans
+  FROM (SELECT 1) LEFT JOIN daily_scan_counts d ON d.date=?1`;

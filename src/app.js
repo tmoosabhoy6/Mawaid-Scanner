@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
 import { eligibility, serviceAt, validateTour, validateSafari, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
-import { listOrder, tourStatus, safariStatus } from './tour-list.js';
+import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL } from './summary.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -14,7 +14,7 @@ const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual
 const uid = () => randomUUID();
 const token = () => randomBytes(32).toString('base64url');
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
-const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour: 'Tour is no longer active in the source sheet' };
+const reasons = { admitted: 'Welcome — meal allowed', before_arrival: 'Arrival date has not started', after_departure: 'Departure date has passed', replaced_card: 'This card was replaced', unknown_card: 'Card not recognised', over_capacity: 'Person exceeds the current tour PAX', inactive_tour:'Tour is no longer active in the source sheet', outside_meal_time:'Meal service is closed. Breakfast 7:00–8:30 am; lunch 11:00 am–1:30 pm; dinner 7:30–8:30 pm (Karbala).', already_scanned:'Already admitted for this meal today' };
 export function createApp(options = {}) {
   const config = { origin: process.env.APP_ORIGIN || 'http://localhost:3000',
     adminPassword: process.env.ADMIN_PASSWORD || '',
@@ -69,11 +69,9 @@ export function createApp(options = {}) {
   app.get('/api/session', auth, (req, res) => res.json({ role: 'admin' }));
   app.get('/api/service', (req, res) => res.json({ ...serviceAt(now()), serverTime: now().toISOString(), timezone: TIME_ZONE, startDate: START_DATE }));
   app.get('/api/tours', auth, (req, res) => {
-    const sort = String(req.query.sort || ''), status = String(req.query.status || '');
-    const rows = db.prepare(`SELECT x.*, (SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT t.*, (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
-      (SELECT b.id FROM batches b JOIN cards c ON c.batch_id=b.id JOIN people p ON p.id=c.person_id WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM tours t WHERE t.active=1 AND ${tourStatus(status)} AND (?='' OR t.arrival=?) AND (?='' OR t.tour_id LIKE ? OR t.office LIKE ? OR t.its LIKE ?)) x ORDER BY ${listOrder(sort, 'x.')}`).all(
-      req.query.arrival || '', req.query.arrival || '', req.query.q || '', `%${req.query.q || ''}%`, `%${req.query.q || ''}%`, `%${req.query.q || ''}%`);
+    const arrival = String(req.query.arrival || ''), q = String(req.query.q || '').slice(0,150), sort = String(req.query.sort || ''), status = String(req.query.status || '');
+    const query = tourList({ arrival, q: q.toLowerCase(), sort, status });
+    const rows = db.prepare(query.sql).all(...query.params);
     res.json(rows);
   });
   app.post('/api/tours', auth, (req, res) => {
@@ -87,9 +85,8 @@ export function createApp(options = {}) {
   // Safari cards print without a QR code, so they have no people, cards or scans.
   app.get('/api/safaris', auth, (req, res) => {
     const arrival = req.query.arrival || '', q = req.query.q || '', sort = String(req.query.sort || ''), status = String(req.query.status || '');
-    res.json(db.prepare(`SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM (SELECT s.*,
-      (SELECT b.id FROM batches b JOIN safari_prints sp ON sp.batch_id=b.id WHERE sp.safari_id=s.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM safaris s WHERE ${safariStatus(status)} AND (?='' OR arrival=?) AND (?='' OR tour_id LIKE ? OR office LIKE ? OR its LIKE ?) ORDER BY ${listOrder(sort, 's.')},s.created_at LIMIT 1000) x ORDER BY ${listOrder(sort, 'x.')},x.created_at`).all(arrival, arrival, q, `%${q}%`, `%${q}%`, `%${q}%`));
+    const query = safariList({ arrival, q: q.toLowerCase(), sort, status });
+    res.json(db.prepare(query.sql).all(...query.params));
   });
   app.post('/api/safaris', auth, (req, res) => {
     let s; try { s = validateSafari(req.body); } catch (e) { throw fail(e.message); }
@@ -167,7 +164,7 @@ export function createApp(options = {}) {
     });
     res.status(201).json(result);
   });
-  app.get('/api/batches', auth, (req, res) => res.json(db.prepare(`SELECT b.id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_ready,COUNT(c.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS count,SUM(CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS active_count FROM batches b LEFT JOIN cards c ON c.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 200`).all()));
+  app.get('/api/batches', auth, (req, res) => res.json(db.prepare(BATCH_LIST_SQL).all()));
   app.get('/api/batches/:id/pdf', auth, (req, res) => {
     const batch = db.prepare('SELECT pdf,printer_status FROM batches WHERE id=?').get(req.params.id);
     if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.', 410);
@@ -186,12 +183,12 @@ export function createApp(options = {}) {
       const previous = db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey);
       if (previous) return { ...previous, replayed: true };
       const c = code.startsWith('MW1:') ? db.prepare(`SELECT c.*,p.person_no,p.tour_id,t.arrival,t.departure,t.pax,t.active,t.office,t.tour_id AS display_tour FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id WHERE c.token_hash=?`).get(hash(code.slice(4))) : null;
-      // Green means a recognised card inside its stay dates; repeat scans are not limited by meal.
       const check = eligibility(c, now()); let reason = check.reason;
       if (c && !c.active) reason = 'inactive_tour';
       if (check.allowed && c.person_no > c.pax) reason = 'over_capacity';
-      const row = { request_key: requestKey, card_id: c?.id || null, tour_id: c?.tour_id || null, person_no: c?.person_no || null, date: check.date, meal: null, reason, scanned_at: now().toISOString() };
-      db.prepare('INSERT INTO scan_logs(request_key,card_id,tour_id,person_no,date,meal,reason,scanned_at) VALUES(?,?,?,?,?,?,?,?)').run(...Object.values(row));
+      if (reason === 'admitted' && db.prepare('SELECT 1 FROM admissions WHERE person_id=? AND date=? AND meal=?').get(c.person_id,check.date,check.meal)) reason = 'already_scanned';
+      const row = { request_key: requestKey, card_id: c?.id || null, person_id: c?.person_id || null, tour_id: c?.tour_id || null, person_no: c?.person_no || null, date: check.date, meal: check.meal, reason, scanned_at: now().toISOString() };
+      db.prepare('INSERT INTO scan_logs(request_key,card_id,person_id,tour_id,person_no,date,meal,reason,scanned_at) VALUES(?,?,?,?,?,?,?,?,?)').run(...Object.values(row));
       return row;
     });
     // A network replay can acknowledge a prior admission but must not show a fresh green gate.
@@ -199,13 +196,12 @@ export function createApp(options = {}) {
   });
   app.get('/api/logs', auth, (req, res) => {
     const { date = '', tour = '', status = '', office = '' } = req.query;
-    res.json(db.prepare(`SELECT s.*,t.tour_id AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
-      WHERE (?='' OR s.date=?) AND (?='' OR t.tour_id LIKE ?) AND (?='' OR t.office LIKE ?)
-      AND (?='' OR (?='green' AND s.reason='admitted') OR (?='red' AND s.reason!='admitted')) ORDER BY s.id DESC LIMIT 1000`).all(date,date,tour,`%${tour}%`,office,`%${office}%`,status,status,status));
+    const query = scanLogQuery({ date, tour: tour.toLowerCase(), office: office.toLowerCase(), status });
+    res.json(db.prepare(query.sql).all(...query.params));
   });
   app.get('/api/summary', auth, (req, res) => {
     const date = req.query.date || serviceAt(now()).date;
-    res.json(db.prepare(SUMMARY_SQL).all(date));
+    res.json(db.prepare(SUMMARY_SQL).get(date));
   });
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
   app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));

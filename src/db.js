@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 const TOURS = `CREATE TABLE IF NOT EXISTS tours (
       id TEXT PRIMARY KEY, tour_id TEXT, its TEXT, office TEXT NOT NULL,
@@ -37,6 +37,10 @@ export function openDatabase(path) {
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   upgradeTours(db);
+  if (!db.prepare('PRAGMA table_info(scan_logs)').all().some(c => c.name === 'person_id')) db.exec('ALTER TABLE scan_logs ADD COLUMN person_id TEXT');
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='daily_scan_counts'").get()) {
+    transaction(db, () => db.exec(readFileSync(new URL('../cloudflare/migrations/0004_query_cost_and_daily_counts.sql', import.meta.url), 'utf8')));
+  }
   return db;
 }
 // Databases created before tour IDs became optional are rebuilt once, keeping every row and rowid.

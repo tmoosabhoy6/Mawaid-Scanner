@@ -7,18 +7,18 @@ import { writeFileSync,mkdirSync,readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { makeSafariLabels } from '../src/labels.js';
 
-test('50 unique cards; a valid card is green on every scan, at any hour of its stay',async()=>{
+test('50 unique cards; one admission per meal across concurrent scans',async()=>{
  const f=await fixture();try{
  const t=await tour(f,50),{batch,cards}=await issue(f,t.id);
  assert.equal(cards.length,50);assert.equal(new Set(cards.map(c=>c.token)).size,50);
  assert.ok(cards.every(c=>/^[\w-]{43}$/.test(c.token)));
  const results=await Promise.all(Array.from({length:30},()=>scan(f,cards[0].token)));
- assert.equal(results.filter(r=>r.body.status==='green').length,30);
- assert.ok(results.every(r=>r.body.meal===null));
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,30);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,0);
+ assert.equal(results.filter(r=>r.body.status==='green').length,1);
+ assert.ok(results.every(r=>r.body.meal==='breakfast'));
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,30);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,1);
  f.setTime('2026-10-21T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
- f.setTime('2026-10-21T16:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
- f.setTime('2026-10-22T03:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ f.setTime('2026-10-21T16:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ f.setTime('2026-10-22T04:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
  const pdf=await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(200);
  assert.equal(pdf.headers['content-type'],'application/pdf');assert.ok(pdf.body.length>10000);
  if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/50-labels.pdf`,pdf.body);writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/expected.json`,JSON.stringify(cards.map(c=>`MW1:${c.token}`)));}
@@ -33,9 +33,9 @@ test('five lost cards keep 50 people and revoke the originals',async()=>{
  await f.admin.post('/api/labels').send({personIds:ids,expectedCardIds:Object.fromEntries(cards.slice(0,5).map(c=>[c.person_id,c.id])),requestKey:randomUUID()}).expect(201);
  const replacements=f.rendered.at(-1);assert.equal(replacements.length,5);
  for(const c of cards.slice(0,5))assert.equal((await scan(f,c.token)).body.reason,'replaced_card');
- for(const c of replacements)assert.equal((await scan(f,c.token)).body.status,'green');
+ for(const c of replacements)assert.equal((await scan(f,c.token)).body.reason,'already_scanned');
  await Promise.all(cards.slice(5).map(c=>scan(f,c.token)));
- const summary=await f.admin.get('/api/summary?date=2026-10-21').expect(200);assert.equal(summary.body[0].people,50);assert.equal(summary.body[0].scans,55);
+ const summary=await f.admin.get('/api/summary?date=2026-10-21').expect(200);assert.equal(summary.body.breakfast,50);assert.equal(summary.body.scans,50);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,50);
  }finally{f.close();}
 });
@@ -78,14 +78,14 @@ test('two operators cannot issue overlapping initial cards or replacements',asyn
  }finally{f.close();}
 });
 
-test('before arrival, after departure and unknown QR deny access; former closed hours are green',async()=>{
+test('before arrival, after departure and unknown QR deny access; closed hours are red',async()=>{
  const f=await fixture();try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);
  for(const [clock,reason] of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-24T04:00:00Z','after_departure']]){
  f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'red');assert.equal(r.body.reason,reason);
  }
- for(const clock of ['2026-10-21T06:00:00Z','2026-10-21T12:00:00Z','2026-10-21T18:30:00Z','2026-10-23T20:59:00Z']){f.setTime(clock);assert.equal((await scan(f,cards[0].token)).body.status,'green');}
- const service=await f.scanner.get('/api/service').expect(200);assert.equal(service.body.date,'2026-10-23');assert.equal(service.body.meal,undefined);
+ for(const clock of ['2026-10-21T06:00:00Z','2026-10-21T12:00:00Z','2026-10-21T18:30:00Z','2026-10-23T20:59:00Z']){f.setTime(clock);assert.equal((await scan(f,cards[0].token)).body.reason,'outside_meal_time');}
+ const service=await f.scanner.get('/api/service').expect(200);assert.equal(service.body.date,'2026-10-23');assert.equal(service.body.meal,null);
  assert.equal((await scan(f,'unknown')).body.reason,'unknown_card');
  }finally{f.close();}
 });
@@ -164,7 +164,7 @@ test('Pehli/Wada import grants all meals on Wada plus one day, then expires',asy
  await request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:built.tours}).expect(200);
  const tour=(await f.admin.get('/api/tours')).body[0];assert.equal(tour.departure,'2026-10-24');
  const {cards}=await issue(f,tour.id);assert.equal(cards[0].departure,'2026-10-24');
- for(const time of ['2026-10-24T03:30:00Z','2026-10-24T09:30:00Z','2026-10-24T16:00:00Z']){
+ for(const time of ['2026-10-24T04:00:00Z','2026-10-24T09:30:00Z','2026-10-24T16:30:00Z']){
  f.setTime(time);assert.equal((await scan(f,cards[0].token)).body.status,'green');
  }
  f.setTime('2026-10-25T03:30:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'after_departure');
@@ -186,11 +186,9 @@ test('archive export pages records; clearing never touches today, active stays o
  const f=await fixture();try{
  const t=await tour(f,2),{batch,cards}=await issue(f,t.id);
  assert.equal((await scan(f,cards[0].token)).body.status,'green');assert.equal((await scan(f,cards[1].token)).body.status,'green');
- // Per-meal admissions are no longer written; one recorded before the change is still archived and cleared.
- f.db.prepare("INSERT INTO admissions VALUES(?,'2026-10-21','breakfast',?,'2026-10-21T04:00:00Z')").run(cards[0].person_id,cards[0].id);
  f.setTime('2026-10-22T04:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
  let status=(await f.admin.get('/api/archive?before=2026-10-22').expect(200)).body;
- assert.deepEqual(status.counts,{scans:2,meals:1,pdfs:0});assert.equal(status.today,'2026-10-22');assert.ok(status.databaseBytes>0);
+ assert.deepEqual(status.counts,{scans:2,meals:2,pdfs:0});assert.equal(status.today,'2026-10-22');assert.ok(status.databaseBytes>0);
  await f.admin.get('/api/archive?before=2026-10-23').expect(400);
  await f.scanner.get('/api/archive').expect(401);await f.scanner.post('/api/archive/clear').send({before:'2026-10-22'}).expect(401);
  await f.admin.post('/api/archive/clear').send({}).expect(400);await f.admin.post('/api/archive/clear').send({before:''}).expect(400);await f.admin.get('/api/archive/unknown').expect(404);
@@ -198,10 +196,10 @@ test('archive export pages records; clearing never touches today, active stays o
  assert.equal(first.rows.length,1);assert.equal(first.rows[0].tour_id,'26/3205');assert.equal(first.rows[0].reason,'admitted');assert.ok(first.next);
  const rest=(await f.admin.get(`/api/archive/scans?before=2026-10-22&limit=1&after=${first.next}`).expect(200)).body;
  assert.equal(rest.rows.length,1);assert.notEqual(rest.rows[0].cursor,first.rows[0].cursor);
- const meals=(await f.admin.get('/api/archive/meals?before=2026-10-22').expect(200)).body;assert.equal(meals.rows.length,1);assert.equal(meals.next,null);assert.equal(meals.rows[0].meal,'breakfast');
+ const meals=(await f.admin.get('/api/archive/meals?before=2026-10-22').expect(200)).body;assert.equal(meals.rows.length,2);assert.equal(meals.next,null);assert.equal(meals.rows[0].meal,'breakfast');
  for(const name of ['tours','cards','prints'])assert.ok((await f.admin.get(`/api/archive/${name}?before=2026-10-22`).expect(200)).body.rows.length>=1);
  const cleared=(await f.admin.post('/api/archive/clear').send({before:'2026-10-22'}).expect(200)).body;
- assert.deepEqual(cleared.deleted,{scans:2,meals:1,pdfs:0});assert.equal(cleared.done,true);
+ assert.deepEqual(cleared.deleted,{scans:2,meals:2,pdfs:0});assert.equal(cleared.done,true);
  // Today's scan record survives.
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,1);
  await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(200);
@@ -224,7 +222,7 @@ test('tour ID and ITS are optional; tours without an ID never merge and still pr
  const found=(await f.admin.get('/api/tours').query({q:'304123'}).expect(200)).body;assert.equal(found.length,1);assert.equal(found[0].its,'30412345');
  const {cards}=await issue(f,a.body.id);assert.equal(cards[0].tour_id,null);assert.equal((await scan(f,cards[0].token)).body.status,'green');
  const logs=(await f.admin.get('/api/logs').expect(200)).body;assert.equal(logs[0].display_tour,null);
- assert.equal((await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body.length,2);
+ assert.equal((await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body.scans,1);
  // A tour ID entered again for the same arrival still finds the existing stay.
  const named=await tour(f,1);assert.equal((await f.admin.post('/api/tours').send({...named,its:'1'}).expect(200)).body.id,named.id);
  }finally{f.close();}

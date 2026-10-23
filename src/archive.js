@@ -4,7 +4,7 @@ import { validDate } from './rules.js';
 export const ARCHIVE_PAGE = 1000, CLEAR_ROWS = 1000, CLEAR_PDFS = 20;
 // Cloudflare's free plan allows 100,000 rows written per day (UTC), counting index rows and deletes.
 // Clean-up stops at 40,000 so scanning and printing always keep most of the daily allowance.
-export const CLEANUP_WRITE_BUDGET = 40_000, CLEANUP_CHUNK_WRITES = 6_500;
+export const CLEANUP_WRITE_BUDGET = 40_000, CLEANUP_CHUNK_WRITES = 8_000;
 export const ARCHIVE_DATASETS = {
   scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     WHERE s.date<?1 AND s.id>?2 ORDER BY s.id LIMIT ?3`,
@@ -26,7 +26,7 @@ export function archiveSql(envelope) {
   return {
     counts: `SELECT (SELECT COUNT(*) FROM scan_logs WHERE date<?1) AS scans,(SELECT COUNT(*) FROM admissions WHERE date<?1) AS meals,
       (SELECT COUNT(*) FROM batches b WHERE ${stored} AND ${finishedBatch}) AS pdfs`,
-    clearScans: `DELETE FROM scan_logs WHERE id IN (SELECT id FROM scan_logs WHERE date<?1 ORDER BY id LIMIT ${CLEAR_ROWS})`,
+    clearScans: `DELETE FROM scan_logs WHERE id IN (SELECT id FROM scan_logs WHERE date<?1 ORDER BY id LIMIT ${CLEAR_ROWS})${envelope ? ' RETURNING id' : ''}`,
     clearMeals: `DELETE FROM admissions WHERE rowid IN (SELECT rowid FROM admissions WHERE date<?1 LIMIT ${CLEAR_ROWS})`,
     clearPdfs: `UPDATE batches SET pdf=NULL,${envelope ? 'envelope=NULL,' : ''}printer_status='pdf_cleared' WHERE rowid IN (SELECT b.rowid FROM batches b WHERE ${stored} AND ${finishedBatch} LIMIT ${CLEAR_PDFS})`,
   };
