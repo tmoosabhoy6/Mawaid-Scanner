@@ -204,6 +204,10 @@ test('Cloudflare: optional tour ID and ITS; Safari cards are stored without QR c
  assert.deepEqual((await f.call('/tours?q=30412345')).data.map(t=>t.id),[a.data.id]);
  const issued=await f.issue(a.data.id);assert.equal(issued.cards[0].tour_id,null);assert.equal((await f.scan(issued.cards[0].token)).data.status,'green');
  assert.equal((await f.call('/tours',{...base,tour_id:'26/9'})).status,201);assert.equal((await f.call('/tours',{...base,tour_id:'26/9',pax:4})).data.existing,true);
+ // The Sheet's 26/ prefix left off, with other but overlapping dates, still finds the listed tour; a later stay is new.
+ const listed=(await f.call('/tours',{...base,tour_id:'26/9'})).data,bare=(await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-23',departure:'2026-10-23'})).data;
+ assert.equal(bare.existing,true);assert.equal(bare.id,listed.id);assert.equal(bare.issued,0);
+ assert.equal((await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-25',departure:'2026-10-26'})).status,201);
  const safari=await f.call('/safaris',{office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12});assert.equal(safari.status,201);
  assert.equal((await f.call('/safaris',{})).status,201);assert.equal((await f.call('/safaris',{pax:-1})).status,400);
  assert.deepEqual((await f.call('/safaris?q=izan')).data.map(s=>s.id),[safari.data.id]);assert.equal((await f.call('/safaris')).data.length,2);

@@ -4,7 +4,7 @@ import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
-import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from './rules.js';
+import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId, SAME_TOUR_SQL, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
@@ -78,7 +78,7 @@ export function createApp(options = {}) {
   app.post('/api/tours', auth, (req, res) => {
     let t; try { t = validateTour(req.body, { requireId: false }); } catch (e) { throw fail(e.message); }
     // Reusing a tour ID for the same stay returns the existing entitlement instead of adding seats.
-    const existing = t.tour_id && db.prepare('SELECT * FROM tours WHERE tour_id=? AND arrival=?').get(t.tour_id, t.arrival);
+    const existing = t.tour_id && db.prepare(SAME_TOUR_SQL).get(bareTourId(t.tour_id), t.arrival, t.departure, t.tour_id);
     if (existing) return res.json({ ...existing, existing: true });
     const id = uid(); db.prepare('INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id, t.tour_id, t.its, t.office, t.arrival, t.departure, t.pax, now().toISOString());
     res.status(201).json({ id, ...t });

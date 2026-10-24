@@ -44,6 +44,14 @@ export function validateTour(input, { requireId = true } = {}) {
   if (!Number.isInteger(tour.pax) || tour.pax < 1 || tour.pax > 10000) throw new Error('PAX must be a whole number from 1 to 10,000.');
   return tour;
 }
+// The Google Sheet writes tour IDs with a year prefix ("26/2849"); staff adding a tour by hand often type "2849".
+// A tour added by hand is the same tour as a listed one when the IDs match without that prefix and the stays
+// overlap, so it reuses that tour's cards instead of adding a second entry. Params: bare ID, arrival, departure, ID.
+export const bareTourId = id => String(id).toLowerCase().replace(/^\d{2}\//, '');
+export const SAME_TOUR_SQL = `SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t
+  WHERE lower(CASE WHEN t.tour_id GLOB '[0-9][0-9]/*' THEN substr(t.tour_id,4) ELSE t.tour_id END)=?1
+  AND t.arrival<=?3 AND t.departure>=?2 AND (t.active=1 OR t.tour_id=?4)
+  ORDER BY t.arrival=?2 DESC,t.active DESC,t.source='sheets' DESC,t.created_at LIMIT 1`;
 // Safari (takeaway) cards have no QR code, and every field is optional.
 export function validateSafari(input) {
   const blank = value => value === undefined || value === null || value === '';

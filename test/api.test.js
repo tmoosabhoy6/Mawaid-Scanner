@@ -227,6 +227,11 @@ test('tour ID and ITS are optional; tours without an ID never merge and still pr
  assert.equal((await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body.scans,1);
  // A tour ID entered again for the same arrival still finds the existing stay.
  const named=await tour(f,1);assert.equal((await f.admin.post('/api/tours').send({...named,its:'1'}).expect(200)).body.id,named.id);
+ // Typing the tour ID without the Sheet's year prefix, for an overlapping stay, finds the same tour.
+ const sheet=(await f.admin.post('/api/tours').send({...base,tour_id:'26/2849',arrival:'2026-10-21',departure:'2026-10-24',pax:3}).expect(201)).body;
+ const again=(await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-24',departure:'2026-10-24',pax:2}).expect(200)).body;
+ assert.equal(again.id,sheet.id);assert.equal(again.pax,3);assert.equal(again.issued,0);
+ await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-26',departure:'2026-10-27'}).expect(201);
  }finally{f.close();}
 });
 

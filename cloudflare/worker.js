@@ -1,4 +1,4 @@
-import { serviceAt, validateTour, validateSafari, validateExtension, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId, SAME_TOUR_SQL, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
@@ -82,7 +82,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
-  const existing=t.tour_id&&await first(db,'SELECT * FROM tours WHERE tour_id=? AND arrival=?',t.tour_id,t.arrival);if(existing)return json({...existing,existing:true});
+  const existing=t.tour_id&&await first(db,SAME_TOUR_SQL,bareTourId(t.tour_id),t.arrival,t.departure,t.tour_id);if(existing)return json({...existing,existing:true});
   const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',id,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t},201);
  }
  // Safari cards print without a QR code, so they have no people, cards or scans.
