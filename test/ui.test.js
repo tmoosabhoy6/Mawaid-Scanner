@@ -82,7 +82,7 @@ test('signed out, / asks for the administrator password only',async()=>{
  assert.equal(d.querySelector('#loginForm select'),null);assert.match(d.querySelector('#loginForm').textContent,/Administrator password/);
  }finally{dom?.window.close();f.close();}
 });
-test('scanner: valid QR green once per meal, unknown red, no yellow state',async()=>{
+test('scanner: breakfast lets every QR in; other meals green once, unknown red, no yellow state',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);f.setTime('2026-10-21T04:00:00Z');// Breakfast in Karbala.
  dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document;
@@ -90,14 +90,19 @@ test('scanner: valid QR green once per meal, unknown red, no yellow state',async
  assert.equal(d.querySelector('#loginForm'),null);assert.doesNotMatch(d.body.textContent,/Sign (in|out)|Back to printing system/);
  assert.equal(d.querySelector('#manualSubmit').disabled,false);assert.equal(d.querySelector('.meal-strip'),null);assert.match(d.querySelector('#scanResult').textContent,/Breakfast/);
  const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode');
- input.value=`MW1:${cards[0].token}`;submit(w,form);await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
- assert.equal(d.querySelector('#scanResult strong').textContent,'ALLOW');
- await new Promise(r=>setTimeout(r,3100));d.querySelector('#scanResult').className='scan-result';input.value=`MW1:${cards[0].token}`;submit(w,form);
- await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));assert.match(d.querySelector('#scanResult').textContent,/Already admitted/);
- await new Promise(r=>setTimeout(r,1400));input.value='MW1:unknown';submit(w,form);
- await waitFor(()=>d.querySelector('#scanResult').classList.contains('red'));assert.match(d.querySelector('#scanResult').textContent,/not recognised/);
+ const result=async(code,colour,text,wait=1400)=>{await new Promise(r=>setTimeout(r,wait));d.querySelector('#scanResult').className='scan-result';input.value=code;submit(w,form);
+  await waitFor(()=>d.querySelector('#scanResult').classList.contains(colour));assert.match(d.querySelector('#scanResult').textContent,text);};
+ // Breakfast is only counted: a repeat and an unlisted code are let in too.
+ await result(`MW1:${cards[0].token}`,'green',/ALLOW/,0);
+ await result(`MW1:${cards[0].token}`,'green',/ALLOW.*already counted for breakfast, at 7:00 am/,3100);
+ await result('MW1:unknown','green',/ALLOW.*open to all/);
+ // Lunch keeps the rules: one admission per person, unknown cards turned away.
+ f.setTime('2026-10-21T09:30:00Z');
+ await result(`MW1:${cards[0].token}`,'green',/ALLOW/);
+ await result(`MW1:${cards[0].token}`,'red',/Already admitted/,3100);
+ await result('MW1:unknown','red',/not recognised/);
  assert.equal(d.querySelector('[class*=yellow]'),null);
- assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").get().n,1);
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM scan_logs WHERE reason='admitted'").get().n,2);
  }finally{dom?.window.close();f.close();}
 });
 
@@ -167,7 +172,7 @@ function fakeFolder(name){
 async function archiveFixture(){
  const f=await fixture();const t=await tour(f,2),{cards}=await issue(f,t.id);
  await scan(f,cards[0].token);
- await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
+ f.setTime('2026-10-21T09:30:00Z');await scan(f,'=HYPERLINK("bad")');f.setTime('2026-10-22T04:00:00Z');await scan(f,cards[1].token);
  return f;
 }
 async function startArchive(w,d){
@@ -336,6 +341,27 @@ test('tours: Extend adds lunch or a whole day on the same cards, shows it on the
  await waitFor(()=>/\+ Sat 24 Oct · All day/.test(d.querySelector('#tourTable').textContent));
  d.querySelector('.remove-extension').click();await waitFor(()=>!d.querySelector('.remove-extension'));
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tour_extensions WHERE removed_at IS NULL').get().n,0);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('an offline phone lets every breakfast QR in and the server counts each person once',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T04:00:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
+ await waitFor(()=>/2 cards on this phone/.test(d.querySelector('#scannerStatus')?.textContent||''));
+ const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode');
+ const result=async(code,text,wait=1400)=>{await new Promise(r=>setTimeout(r,wait));d.querySelector('#scanResult').className='scan-result';input.value=code;submit(w,form);
+  await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));assert.match(d.querySelector('#scanResult').textContent,text);};
+ offline=true;
+ await result(`MW1:${cards[0].token}`,/ALLOW.*Checked offline/,0);
+ await result(`MW1:${cards[0].token}`,/already counted for breakfast, at 7:00 am/,3100);
+ await result('MW1:unknown',/open to all/);
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT reason FROM scan_logs ORDER BY id').all().map(r=>r.reason),['admitted','breakfast_repeat','breakfast_unlisted']);
+ assert.equal((await f.admin.get('/api/summary?date=2026-10-21')).body.breakfast,1);
  }finally{dom?.window.close();f.close();}
 });
 

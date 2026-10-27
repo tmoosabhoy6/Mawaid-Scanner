@@ -1,5 +1,5 @@
 import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId, SAME_TOUR_SQL, TIME_ZONE, START_DATE } from '../src/rules.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
@@ -193,8 +193,8 @@ async function scan(db,body,now){
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
  const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),codeHash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
- const replayed=!row,earlier=result.reason==='already_scanned'?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
- return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:result.reason==='admitted'&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
+ const replayed=!row,earlier=REPEAT_REASONS.includes(result.reason)?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
+ return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:GREEN_REASONS.includes(result.reason)&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
 }
 async function batchManifest(db,id,env){
  const row=await first(db,'SELECT id,envelope,pdf IS NOT NULL AS pdf_ready,remaining FROM batches WHERE id=?',id);

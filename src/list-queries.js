@@ -1,4 +1,6 @@
 import { listOrder, tourStatus, safariStatus } from './tour-list.js';
+import { GREEN_REASONS } from './scan-query.js';
+const green = `s.reason IN (${GREEN_REASONS.map(r => `'${r}'`).join(',')})`;
 // Optional date filters must stay indexable: WHERE arrival=? rather than (?='' OR arrival=?).
 export function tourList({ arrival = '', q = '', sort = '', status = '' } = {}) {
   const params = [], where = ['t.active=1', tourStatus(status)];
@@ -27,8 +29,8 @@ export function scanLogQuery({ date = '', tour = '', office = '', status = '' } 
   if (date) { where.push('s.date=?'); params.push(date); }
   if (tour) { where.push('instr(lower(t.tour_id),?)>0'); params.push(tour); }
   if (office) { where.push('instr(lower(t.office),?)>0'); params.push(office); }
-  if (status === 'green') where.push("s.reason='admitted'");
-  if (status === 'red') where.push("s.reason!='admitted'");
+  if (status === 'green') where.push(green);
+  if (status === 'red') where.push(`NOT ${green}`);
   return { sql: `SELECT s.*,t.tour_id AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     ${where.length ? 'WHERE '+where.join(' AND ') : ''} ORDER BY s.id DESC LIMIT 1000`, params };
 }

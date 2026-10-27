@@ -229,7 +229,7 @@ async function logsView(){
   // Only the latest load draws the log; a tour ID search looks across every date.
   let loads=0;
   const load=async()=>{const params=new URLSearchParams(new FormData($('#logFilters'))),n=++loads,searching=!!params.get('tour').trim();if(searching)params.delete('date');$('#logFilters [name=date]').closest('label').classList.toggle('ignored',searching);
-    const rows=await api(`/logs?${params}`);if(n!==loads)return;$('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${r.reason==='admitted'?'green-chip':'red-chip'}">${r.reason==='admitted'?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
+    const rows=await api(`/logs?${params}`);if(n!==loads)return;$('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${GREEN_REASONS.includes(r.reason)?'green-chip':'red-chip'}">${GREEN_REASONS.includes(r.reason)?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
   liveFilters($('#logFilters'),load);await load();
 }
 async function summaryView(){
@@ -333,7 +333,7 @@ function archiveFiles(d,before,name){
   for(const m of d.meals){const key=`${m.date}|${m.tour_key}`;const row=daily.get(key)||{date:m.date,tour_id:m.tour_id,office:m.office,pax:pax.get(m.tour_key)??'',breakfast:0,lunch:0,dinner:0};row[m.meal]++;daily.set(key,row);}
   const summary=[...daily.values()].sort((a,b)=>a.date.localeCompare(b.date)||String(a.tour_id).localeCompare(String(b.tour_id)));
   return [
-    ['scan-log.csv',csv(['Time (Karbala)','Service date','Meal','Tour ID','Office','Person','Result','Reason','Checked offline'],d.scans.map(r=>[karbalaTime(r.scanned_at),r.date,mealName(r.meal),r.tour_id,r.office,r.person_no,r.reason==='admitted'?'Admitted':'Declined',r.reason.replaceAll('_',' '),r.offline?'Yes':'']))],
+    ['scan-log.csv',csv(['Time (Karbala)','Service date','Meal','Tour ID','Office','Person','Result','Reason','Checked offline'],d.scans.map(r=>[karbalaTime(r.scanned_at),r.date,mealName(r.meal),r.tour_id,r.office,r.person_no,GREEN_REASONS.includes(r.reason)?'Admitted':'Declined',r.reason.replaceAll('_',' '),r.offline?'Yes':'']))],
     ['meals-served.csv',csv(['Service date','Meal','Tour ID','Office','Person','Scanned (Karbala)'],d.meals.map(r=>[r.date,mealName(r.meal),r.tour_id,r.office,r.person_no,karbalaTime(r.scanned_at)]))],
     ['daily-meal-summary.csv',csv(['Service date','Tour ID','Office','PAX','Breakfast','Lunch','Dinner'],summary.map(r=>[r.date,r.tour_id,r.office,r.pax,r.breakfast,r.lunch,r.dinner]))],
     ['tours.csv',csv(['Tour ID','ITS','Office','Arrival','Departure','PAX','Cards issued','Source','Active','Added (Karbala)'],d.tours.map(t=>[t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.issued,t.source==='sheets'?'Google Sheet':'Added manually',t.active?'Yes':'No',karbalaTime(t.created_at)]))],
@@ -381,7 +381,9 @@ function downloadZip(filename,entries){const url=URL.createObjectURL(zipBlob(ent
    cards held on the phone, and send those scans to the server once the connection returns. */
 const OFFLINE_DATA_KEY='mawaidScannerData',OFFLINE_QUEUE_KEY='mawaidScanQueue',ONLINE_TIMEOUT=3000;
 let offlineData=null,scanQueue=[],connected=true,toursPolls=0,retryTimer=null;
-const OFFLINE_REASONS={admitted:'Welcome — meal allowed',unknown_card:'Card not on this phone’s list',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',extension_other_meal:'Stay extended for lunch only today',already_scanned:'Already admitted for this meal today'};
+// Green results; only 'admitted' records a meal. Breakfast lets every card in (see SCAN_SQL).
+const GREEN_REASONS=['admitted','breakfast_repeat','breakfast_unlisted'];
+const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Card not on this phone’s list',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',extension_other_meal:'Stay extended for lunch only today',already_scanned:'Already admitted for this meal today'};
 function readStored(key,fallback){try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return fallback;}}
 function store(key,value){try{localStorage.setItem(key,JSON.stringify(value));}catch{}}
 const clock12=v=>new Intl.DateTimeFormat('en-GB',{hour:'numeric',minute:'2-digit',hour12:true,timeZone:TIME_ZONE}).format(new Date(v));
@@ -428,22 +430,23 @@ async function sha256(text,format){
 async function checkOffline(code,now){
   const d=offlineData,service=karbalaService(now,d?.meals),result={date:service.date,meal:service.meal,offline:true};
   const reason=await(async()=>{
-    if(!code.startsWith('MW1:'))return 'unknown_card';
-    const card=d.cards[await sha256(code.slice(4),d.hash)],tour=card&&d.tours[card[1]];
-    if(!card||!tour)return 'unknown_card';
-    const [person,tourId,no,revoked]=card,[arrival,departure,pax,active]=tour,extension=d.ext[`${tourId}|${service.date}`];
+    const breakfast=service.meal==='breakfast',card=code.startsWith('MW1:')&&d.cards[await sha256(code.slice(4),d.hash)],tour=card&&d.tours[card[1]];
+    if(!card||!tour)return breakfast?'breakfast_unlisted':'unknown_card';
+    const [person,tourId,no,revoked]=card,[arrival,departure,pax,active]=tour,extension=d.ext[`${tourId}|${service.date}`],served=d.servedDate===service.date&&d.served[`${person}|${service.meal}`];
     Object.assign(result,{person_id:person,person_no:no});
+    if(typeof served==='string')result.firstScannedAt=served;
+    if(breakfast)return served?'breakfast_repeat':'admitted';
     if(!active)return 'inactive_tour';if(revoked)return 'replaced_card';
     if(service.date<arrival)return 'before_arrival';if(service.date>departure&&!extension)return 'after_departure';
     if(no>pax)return 'over_capacity';if(!service.meal)return 'outside_meal_time';
     if(service.date>departure&&extension!=='day'&&extension!==service.meal)return 'extension_other_meal';
-    if(d.servedDate===service.date&&d.served[`${person}|${service.meal}`]){const at=d.served[`${person}|${service.meal}`];if(typeof at==='string')result.firstScannedAt=at;return 'already_scanned';}
+    if(served)return 'already_scanned';
     return 'admitted';
   })();
-  return {...result,reason,status:reason==='admitted'?'green':'red',message:OFFLINE_REASONS[reason]};
+  return {...result,reason,status:GREEN_REASONS.includes(reason)?'green':'red',message:OFFLINE_REASONS[reason]};
 }
 function recordServed(result,at){
-  const d=offlineData;if(!d||result.status!=='green'||!result.person_id||!result.meal)return;
+  const d=offlineData;if(!d||result.status!=='green'||result.reason!=='admitted'||!result.person_id||!result.meal)return;
   if(d.servedDate!==result.date){d.served={};d.servedDate=result.date;}
   d.served[`${result.person_id}|${result.meal}`]=at;store(OFFLINE_DATA_KEY,d);
 }
@@ -506,7 +509,7 @@ async function scannerView(){
     let result;try{result=await checkCard(code,crypto.randomUUID(),at);}catch{result={status:'red',message:'No confirmed admission. Check the scan log before retrying.'};}
     recordServed(result,at.toISOString());
     const duplicate=result.reason==='already_scanned',title=result.status==='green'?'ALLOW':duplicate?'ALREADY SCANNED':'DO NOT ADMIT';
-    const detail=[result.message+(duplicate&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}`:''),result.person_no?`Person ${result.person_no}`:'',result.offline?'Checked offline':''].filter(Boolean).join(' · ');
+    const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}`:''),result.person_no?`Person ${result.person_no}`:'',result.offline?'Checked offline':''].filter(Boolean).join(' · ');
     showResult(result.status==='green'?'green':'red',title,detail);flash(result.status==='green',title,detail);
     beep(result.status==='green',duplicate);
     setTimeout(()=>{scannerBusy=false;},1300);

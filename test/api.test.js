@@ -12,11 +12,13 @@ test('50 unique cards; one admission per meal across concurrent scans',async()=>
  const t=await tour(f,50),{batch,cards}=await issue(f,t.id);
  assert.equal(cards.length,50);assert.equal(new Set(cards.map(c=>c.token)).size,50);
  assert.ok(cards.every(c=>/^[\w-]{43}$/.test(c.token)));
+ // Breakfast lets every scan in, but counts the person once.
  const results=await Promise.all(Array.from({length:30},()=>scan(f,cards[0].token)));
- assert.equal(results.filter(r=>r.body.status==='green').length,1);
- assert.ok(results.every(r=>r.body.meal==='breakfast'));
+ assert.ok(results.every(r=>r.body.status==='green'&&r.body.meal==='breakfast'));
+ assert.equal(results.filter(r=>r.body.reason==='admitted').length,1);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,30);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,1);
- f.setTime('2026-10-21T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ f.setTime('2026-10-21T09:30:00Z');const lunch=await Promise.all(Array.from({length:30},()=>scan(f,cards[0].token)));
+ assert.equal(lunch.filter(r=>r.body.status==='green').length,1);assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM admissions').get().n,2);
  f.setTime('2026-10-21T16:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
  f.setTime('2026-10-22T04:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
  const pdf=await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(200);
@@ -27,7 +29,7 @@ test('50 unique cards; one admission per meal across concurrent scans',async()=>
 
 test('five lost cards keep 50 people and revoke the originals',async()=>{
  const f=await fixture();try{
- const t=await tour(f,50),{cards}=await issue(f,t.id);
+ const t=await tour(f,50),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:30:00Z');
  await Promise.all(cards.slice(0,5).map(c=>scan(f,c.token)));
  const ids=cards.slice(0,5).map(c=>c.person_id);
  await f.admin.post('/api/labels').send({personIds:ids,expectedCardIds:Object.fromEntries(cards.slice(0,5).map(c=>[c.person_id,c.id])),requestKey:randomUUID()}).expect(201);
@@ -35,14 +37,14 @@ test('five lost cards keep 50 people and revoke the originals',async()=>{
  for(const c of cards.slice(0,5))assert.equal((await scan(f,c.token)).body.reason,'replaced_card');
  for(const c of replacements)assert.equal((await scan(f,c.token)).body.reason,'already_scanned');
  await Promise.all(cards.slice(5).map(c=>scan(f,c.token)));
- const summary=await f.admin.get('/api/summary?date=2026-10-21').expect(200);assert.equal(summary.body.breakfast,50);assert.equal(summary.body.scans,50);
+ const summary=await f.admin.get('/api/summary?date=2026-10-21').expect(200);assert.equal(summary.body.lunch,50);assert.equal(summary.body.scans,50);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,50);
  }finally{f.close();}
 });
 
 test('unlimited replacement iterations; unused entitlement works on newest code only',async()=>{
  const f=await fixture();try{
- const t=await tour(f,1),{cards}=await issue(f,t.id);let previous=cards[0];
+ const t=await tour(f,1),{cards}=await issue(f,t.id);let previous=cards[0];f.setTime('2026-10-21T09:30:00Z');
  for(let n=0;n<12;n++){
  await f.admin.post('/api/labels').send({personIds:[previous.person_id],expectedCardIds:{[previous.person_id]:previous.id},requestKey:randomUUID()}).expect(201);
  assert.equal((await scan(f,previous.token)).body.reason,'replaced_card');previous=f.rendered.at(-1)[0];
@@ -81,7 +83,7 @@ test('two operators cannot issue overlapping initial cards or replacements',asyn
 test('before arrival, after departure and unknown QR deny access; scans at any hour count for that meal',async()=>{
  const f=await fixture();try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);
- for(const [clock,reason] of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-24T04:00:00Z','after_departure']]){
+ for(const [clock,reason] of [['2026-10-20T09:30:00Z','before_arrival'],['2026-10-24T09:30:00Z','after_departure']]){
  f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'red');assert.equal(r.body.reason,reason);
  }
  for(const [clock,meal] of [['2026-10-21T02:00:00Z','breakfast'],['2026-10-21T12:00:00Z','lunch'],['2026-10-21T16:22:00Z','dinner'],['2026-10-23T07:59:00Z','breakfast']]){f.setTime(clock);const r=await scan(f,cards[0].token);assert.equal(r.body.status,'green');assert.equal(r.body.meal,meal);}
@@ -89,6 +91,29 @@ test('before arrival, after departure and unknown QR deny access; scans at any h
  f.setTime('2026-10-21T15:59:59Z');assert.equal((await scan(f,cards[0].token)).body.reason,'already_scanned');
  f.setTime('2026-10-23T20:59:00Z');const service=await f.scanner.get('/api/service').expect(200);assert.equal(service.body.date,'2026-10-23');assert.equal(service.body.meal,'dinner');
  assert.equal((await scan(f,'unknown')).body.reason,'unknown_card');
+ }finally{f.close();}
+});
+
+test('breakfast admits every card for reporting, counting each person once',async()=>{
+ const f=await fixture();try{
+ const due=await tour(f,1),early=await tour(f,2,{tour_id:'26/77',arrival:'2026-10-22',departure:'2026-10-24'}),gone=await tour(f,1,{tour_id:'26/78',arrival:'2026-10-18',departure:'2026-10-20'});
+ const dueCard=(await issue(f,due.id)).cards[0],earlyCards=(await issue(f,early.id)).cards,goneCard=(await issue(f,gone.id)).cards[0];
+ await f.admin.post('/api/labels').send({personIds:[dueCard.person_id],expectedCardIds:{[dueCard.person_id]:dueCard.id},requestKey:randomUUID()}).expect(201);
+ const newCard=f.rendered.at(-1)[0];
+ f.setTime('2026-10-21T04:00:00Z');// 7:00 am in Karbala.
+ const reasons=[];for(const code of [dueCard.token,newCard.token,earlyCards[0].token,earlyCards[1].token,earlyCards[0].token,goneCard.token,'not-a-card']){const r=(await scan(f,code)).body;assert.equal(r.status,'green');reasons.push(r.reason);}
+ // The replaced card counts the person; their new card is a repeat. Early and late stays count too.
+ assert.deepEqual(reasons,['admitted','breakfast_repeat','admitted','admitted','breakfast_repeat','admitted','breakfast_unlisted']);
+ assert.equal((await scan(f,'other text')).body.status,'green');
+ const summary=(await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body;assert.equal(summary.breakfast,4);assert.equal(summary.scans,4);
+ const report=(await f.admin.get('/api/summary/tours?date=2026-10-21').expect(200)).body;
+ assert.deepEqual(Object.fromEntries(report.map(t=>[t.tour_id,t.breakfast])),{'26/3205':1,'26/77':2,'26/78':1});
+ assert.equal((await f.admin.get('/api/logs?date=2026-10-21&status=green').expect(200)).body.length,8);
+ assert.equal((await f.admin.get('/api/logs?date=2026-10-21&status=red').expect(200)).body.length,0);
+ // Lunch keeps every rule.
+ f.setTime('2026-10-21T09:30:00Z');
+ assert.equal((await scan(f,earlyCards[0].token)).body.reason,'before_arrival');assert.equal((await scan(f,goneCard.token)).body.reason,'after_departure');
+ assert.equal((await scan(f,dueCard.token)).body.reason,'replaced_card');assert.equal((await scan(f,'not-a-card')).body.reason,'unknown_card');
  }finally{f.close();}
 });
 
@@ -117,7 +142,7 @@ test('sync is authenticated, idempotent, tab-specific; changed PAX and removed t
  await sync({tab:'wrong',tours:[t]}).expect(409);await sync({tours:[t,t]}).expect(400);
  await sync({tours:[t],tabs:['KRB - 25','Tours']}).expect(200);await sync({tours:[t]}).expect(200);
  const records=await f.admin.get('/api/tours');assert.equal(records.body.length,1);const id=records.body[0].id;
- const {cards}=await issue(f,id);
+ const {cards}=await issue(f,id);f.setTime('2026-10-21T09:30:00Z');
  await sync({tours:[{...t,pax:1}]}).expect(200);assert.equal((await scan(f,cards[1].token)).body.reason,'over_capacity');
  assert.equal((await scan(f,cards[0].token)).body.status,'green');
  await sync({tours:[]}).expect(200);assert.equal((await scan(f,cards[0].token)).body.reason,'inactive_tour');
@@ -169,7 +194,7 @@ test('Pehli/Wada import grants all meals on Wada plus one day, then expires',asy
  for(const time of ['2026-10-24T04:00:00Z','2026-10-24T09:30:00Z','2026-10-24T16:30:00Z']){
  f.setTime(time);assert.equal((await scan(f,cards[0].token)).body.status,'green');
  }
- f.setTime('2026-10-25T03:30:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'after_departure');
+ f.setTime('2026-10-25T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'after_departure');
  }finally{f.close();}
 });
 

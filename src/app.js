@@ -8,7 +8,7 @@ import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId,
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
 import { offlineData } from './offline.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -210,9 +210,9 @@ export function createApp(options = {}) {
       const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), codeHash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0);
       return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
-    const earlier = result.reason === 'already_scanned' ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;
+    const earlier = REPEAT_REASONS.includes(result.reason) ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;
     // A network replay can acknowledge a prior admission but must not show a fresh green gate.
-    res.json({ ...result, replayed: !!result.replayed, firstScannedAt: earlier?.scanned_at || null, status: result.reason === 'admitted' && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
+    res.json({ ...result, replayed: !!result.replayed, firstScannedAt: earlier?.scanned_at || null, status: GREEN_REASONS.includes(result.reason) && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
   });
   app.get('/api/logs', auth, (req, res) => {
     const { date = '', tour = '', status = '', office = '' } = req.query;

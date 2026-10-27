@@ -10,12 +10,11 @@ test('extend stay: lunch only or a whole day after departure, on the same cards,
  assert.equal((await extend({date:'2026-10-23',meals:'lunch'})).status,400,'departure day is already included');
  assert.equal((await extend({date:'2026-10-24',meals:'dinner'})).status,400);
  assert.equal((await f.scanner.post(`/api/tours/${t.id}/extensions`).send({date:'2026-10-24',meals:'day'})).status,401);
- f.setTime('2026-10-24T04:00:00Z');
+ f.setTime('2026-10-24T09:00:00Z');
  const ended=await scan(f,cards[0].token);assert.equal(ended.body.reason,'after_departure');assert.match(ended.body.message,/extend/);
  const lunch=await extend({date:'2026-10-24',meals:'lunch'}).expect(201);
  assert.equal((await extend({date:'2026-10-24',meals:'lunch'})).body.existing,true);
- assert.equal((await scan(f,cards[0].token)).body.reason,'extension_other_meal');
- f.setTime('2026-10-24T09:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ assert.equal((await scan(f,cards[0].token)).body.status,'green');
  f.setTime('2026-10-24T16:30:00Z');assert.equal((await scan(f,cards[0].token)).body.reason,'extension_other_meal');
  // Upgrading to the whole day keeps the lunch-only row as history.
  await extend({date:'2026-10-24',meals:'day'}).expect(201);
@@ -37,9 +36,13 @@ test('extend stay: lunch only or a whole day after departure, on the same cards,
 test('duplicate scans report when the meal was first served',async()=>{
  const f=await fixture();try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);
- const first=await scan(f,cards[0].token);f.setTime('2026-10-21T04:20:00Z');
+ f.setTime('2026-10-21T09:30:00Z');const first=await scan(f,cards[0].token);f.setTime('2026-10-21T09:50:00Z');
  const again=await scan(f,cards[0].token);
  assert.equal(again.body.reason,'already_scanned');assert.equal(again.body.firstScannedAt,first.body.scanned_at);assert.equal(again.body.status,'red');
+ // At breakfast a repeat is let in, still showing when the person was first counted.
+ f.setTime('2026-10-22T04:00:00Z');const breakfast=await scan(f,cards[0].token);f.setTime('2026-10-22T04:20:00Z');
+ const repeat=await scan(f,cards[0].token);
+ assert.deepEqual([repeat.body.reason,repeat.body.status,repeat.body.firstScannedAt],['breakfast_repeat','green',breakfast.body.scanned_at]);
  }finally{f.close();}
 });
 
@@ -50,8 +53,8 @@ test('offline scans are checked at the time they were made; a phone that showed 
  const key=randomUUID(),sent=await sync(cards[0].token,'2026-10-21T04:10:00Z','green',key);
  assert.deepEqual([sent.body.reason,sent.body.meal,sent.body.offline,sent.body.scanned_at],['admitted','breakfast',1,'2026-10-21T04:10:00.000Z']);
  assert.equal((await sync(cards[0].token,'2026-10-21T04:10:00Z','green',key)).body.replayed,true);
- // Two offline phones admitted the same person: the second is logged as a duplicate.
- assert.equal((await sync(cards[0].token,'2026-10-21T04:12:00Z')).body.reason,'already_scanned');
+ // Two offline phones let the same person in to breakfast: the second is logged as a repeat and not counted.
+ assert.equal((await sync(cards[0].token,'2026-10-21T04:12:00Z')).body.reason,'breakfast_repeat');
  assert.equal((await sync(cards[1].token,'2026-10-21T04:15:00Z','red')).body.reason,'offline_declined');
  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM admissions WHERE meal='breakfast'").get().n,1);
  assert.equal((await sync(cards[2].token,'2026-10-18T04:15:00Z')).status,400);

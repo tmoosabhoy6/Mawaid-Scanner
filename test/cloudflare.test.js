@@ -46,20 +46,23 @@ test('Cloudflare: only the administrator signs in; the scanner works without a s
  await f.db.prepare("INSERT INTO sessions VALUES(?,'scanner',?)").bind(await hash('old-scanner-token'),Date.now()+60000).run();
  assert.equal((await f.call('/session',undefined,'old',{headers:{Cookie:'mawayid_session=old-scanner-token'}})).status,401);
  assert.equal((await f.call('/service',undefined,'scanner')).status,200);
- assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner')).data.status,'red');
+ assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner')).data.reason,'breakfast_unlisted');
  }finally{await f.close();}
 });
 
 test('Cloudflare: four phones scanning one card produce exactly one green; a replayed request stays red',async()=>{
  const f=await fixture();try{
- const t=await f.tour(4),b=await f.issue(t.id);
+ const t=await f.tour(4),b=await f.issue(t.id);f.setTime('2026-10-21T09:30:00Z');
  const scans=await Promise.all(Array.from({length:4},()=>f.scan(b.cards[0].token)));
- assert.equal(scans.filter(r=>r.data.status==='green').length,1);assert.ok(scans.every(r=>r.data.meal==='breakfast'));
+ assert.equal(scans.filter(r=>r.data.status==='green').length,1);assert.ok(scans.every(r=>r.data.meal==='lunch'));
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,1);
  const replayKey=randomUUID();const accepted=await f.scan(b.cards[1].token,replayKey);assert.equal(accepted.data.status,'green');
  const retry=await f.scan(b.cards[1].token,replayKey);assert.equal(retry.data.status,'red');assert.equal(retry.data.replayed,true);
- f.setTime('2026-10-21T09:30:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
- f.setTime('2026-10-22T04:00:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
+ f.setTime('2026-10-21T16:30:00Z');assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
+ // Breakfast lets all four phones show green, and still counts the person once.
+ f.setTime('2026-10-22T04:00:00Z');const breakfast=await Promise.all(Array.from({length:4},()=>f.scan(b.cards[0].token)));
+ assert.ok(breakfast.every(r=>r.data.status==='green'));assert.equal(breakfast.filter(r=>r.data.reason==='admitted').length,1);
+ assert.equal((await f.call('/summary?date=2026-10-22')).data.breakfast,1);
  }finally{await f.close();}
 });
 
@@ -67,7 +70,7 @@ test('Cloudflare: replacement revokes old codes; retries reuse tokens',async()=>
  const f=await fixture();try{
  const t=await f.tour(2),key=randomUUID(),b=await f.issue(t.id,key);
  const retry=await f.call('/labels',{tourIds:[t.id],requestKey:key});assert.equal(retry.data.cards[0].token,b.cards[0].token);
- await f.scan(b.cards[0].token);
+ f.setTime('2026-10-21T09:30:00Z');await f.scan(b.cards[0].token);
  const replace=await f.call('/labels',{personIds:b.cards.map(c=>c.person_id),expectedCardIds:Object.fromEntries(b.cards.map(c=>[c.person_id,c.id])),requestKey:randomUUID()});assert.equal(replace.status,201);
  for(const c of b.cards)assert.equal((await f.scan(c.token)).data.reason,'replaced_card');
  assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[0].person_id).token)).data.reason,'already_scanned');
@@ -109,7 +112,7 @@ test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and
  const t={tour_id:'26/1',office:'Source',arrival:'2026-10-21',departure:'2026-10-24',pax:2};
  const sync=tours=>f.call('/sync/tours',{...source,tours},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
  assert.equal((await sync([t])).data.changedTours,1);assert.equal((await sync([t])).data.changedTours,0);
- const tour=(await f.call('/tours')).data[0],b=await f.issue(tour.id);
+ const tour=(await f.call('/tours')).data[0],b=await f.issue(tour.id);f.setTime('2026-10-21T09:30:00Z');
  assert.equal((await sync([{...t,pax:1}])).data.changedTours,1);assert.equal((await f.scan(b.cards[1].token)).data.reason,'over_capacity');
  await sync([]);assert.equal((await f.scan(b.cards[0].token)).data.reason,'inactive_tour');
  }finally{await f.close();}
@@ -118,7 +121,7 @@ test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and
 test('Cloudflare: stay dates, roles and CSRF block admission; every hour belongs to a meal',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);
- for(const [time,reason]of [['2026-10-20T04:00:00Z','before_arrival'],['2026-10-21T06:00:00Z','admitted'],['2026-10-21T07:30:00Z','already_scanned'],['2026-10-21T15:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T04:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
+ for(const [time,reason]of [['2026-10-20T09:30:00Z','before_arrival'],['2026-10-21T09:00:00Z','admitted'],['2026-10-21T15:00:00Z','already_scanned'],['2026-10-21T16:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T09:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
  assert.equal((await f.call('/tours',undefined,'scanner')).status,401);
  assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner',{headers:{Origin:'https://other.test'}})).status,403);
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
@@ -239,7 +242,7 @@ test('Cloudflare: cards from the original schema still scan once per meal after 
  await f.db.batch([`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('t1','26/1','A','2026-10-21','2026-10-24',1,'x')`,`INSERT INTO people VALUES('p1','t1',1)`,
   `INSERT INTO batches(id,created_at,kind,request_key) VALUES('b1','x','initial','k1')`,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES('c1','p1','b1','${digest}','x')`].map(sql=>f.db.prepare(sql)));
  for(const file of MIGRATIONS.slice(1))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
- assert.equal((await f.scan(token)).data.status,'green');for(let n=0;n<2;n++)assert.equal((await f.scan(token)).data.reason,'already_scanned');
+ f.setTime('2026-10-21T09:30:00Z');assert.equal((await f.scan(token)).data.status,'green');for(let n=0;n<2;n++)assert.equal((await f.scan(token)).data.reason,'already_scanned');
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').first()).n,4);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM admissions').first()).n,1);
  }finally{await f.close();}
@@ -298,7 +301,7 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  await f.db.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
  INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
  const scans=[];
- for(const [key,meal] of [['load-first','breakfast'],['load-duplicate','breakfast'],['load-lunch','lunch'],['load-dinner','dinner']]) {
+ for(const [key,meal] of [['load-first','breakfast'],['load-lunch','lunch'],['load-duplicate','lunch'],['load-dinner','dinner']]) {
    const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0).all();
    assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
    assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
@@ -350,10 +353,10 @@ test('Cloudflare: extended stays, offline scans, the phone card list and the tou
  assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'},'scanner')).status,401);
  assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-24',meals:'lunch'})).status,400);
  const ext=await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'});assert.equal(ext.status,201);
- f.setTime('2026-10-25T04:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'extension_other_meal');
+ f.setTime('2026-10-25T16:30:00Z');assert.equal((await f.scan(one.token)).data.reason,'extension_other_meal');
  f.setTime('2026-10-25T09:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
  const dup=await f.scan(one.token);assert.equal(dup.data.reason,'already_scanned');assert.equal(dup.data.firstScannedAt,green.data.scanned_at);
- f.setTime('2026-10-26T04:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'after_departure');
+ f.setTime('2026-10-26T09:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'after_departure');
  // An offline phone's lunch scan from yesterday is counted for yesterday.
  const offline=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-25T09:30:00Z',offlineStatus:'green'},'scanner');
  assert.deepEqual([offline.data.reason,offline.data.date,offline.data.meal,offline.data.offline],['admitted','2026-10-25','lunch',1]);
