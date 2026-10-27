@@ -18,6 +18,14 @@ async function api(path, body) {
 function notify(message) { $('#notice').textContent = message; $('#notice').classList.add('visible'); clearTimeout(notify.timer); notify.timer = setTimeout(()=>$('#notice').classList.remove('visible'),7000); }
 async function guard(fn) { try { await fn(); } catch (err) { notify(err.message); } }
 async function busy(button, fn) { if (button.disabled) return; button.disabled = true; try { await fn(); } finally { button.disabled = false; } }
+// Filters apply as they change, with no Apply button: dates and choices at once, typed text after a short pause.
+function liveFilters(form, load) {
+  let timer; const run = () => { clearTimeout(timer); guard(load); };
+  form.onsubmit = ev => { ev.preventDefault(); run(); };
+  form.onchange = ev => { if (ev.target.matches('select, input[type=date]')) run(); };
+  form.oninput = ev => { if (ev.target.matches('input:not([type=date])')) { clearTimeout(timer); timer = setTimeout(run, 300); } };
+  form.onreset = () => setTimeout(run, 0);
+}
 const LOGO = '/brand/faiz-e-husaini-logo-white.webp';
 const brand = `<div class="brand"><img src="${LOGO}" alt="Faiz-e-Husaini Society (Iraq)" width="132" height="141"><strong>Mawaid</strong><span>Faiz-e-Husaini · Karbala</span></div>`;
 const ornament = `<svg class="ornament" viewBox="0 0 200 18" aria-hidden="true"><path d="M0 9h82M118 9h82" stroke="currentColor" stroke-width="1" opacity=".55"/><g fill="none" stroke="currentColor" stroke-width="1.3"><rect x="94" y="3" width="12" height="12"/><rect x="94" y="3" width="12" height="12" transform="rotate(45 100 9)"/></g></svg>`;
@@ -51,7 +59,7 @@ function printLogCell(t){
   return `<a href="/api/batches/${e(t.batch_id)}/pdf" target="_blank" rel="noopener">View PDF</a>`;
 }
 async function toursView(){
-  $('#main').innerHTML=heading('Tours','Find an arrival date, select your tours, and print their meal cards.',`<button class="primary" id="newTour">＋ Add tour</button>`)+`<section class="panel"><form class="filters" id="tourFilters"><label>Arrival date<input type="date" name="arrival" value="${today()}"></label><label>Tour ID, ITS or office<input name="q" placeholder="Search tours…"></label><label>Show<select name="status"><option value="">All tours</option><option value="unprinted">Not printed</option><option value="printed">Printed</option></select></label><label>Sort by<select name="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="tour">Tour ID</option></select></label><button>Apply</button><button type="reset">Reset</button></form></section><section class="panel"><div class="tablebar"><span id="tourCount" class="count">Loading…</span><button class="primary" id="printSelected" disabled>Print selected</button></div><div class="tablewrap" id="tourTable"></div></section>`;
+  $('#main').innerHTML=heading('Tours','Find an arrival date, select your tours, and print their meal cards.',`<button class="primary" id="newTour">＋ Add tour</button>`)+`<section class="panel"><form class="filters" id="tourFilters"><label>Arrival date<input type="date" name="arrival" value="${today()}"></label><label>Tour ID, ITS or office<input name="q" placeholder="Search tours…"></label><label>Show<select name="status"><option value="">All tours</option><option value="unprinted">Not printed</option><option value="printed">Printed</option></select></label><label>Sort by<select name="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="tour">Tour ID</option></select></label><button type="reset">Reset</button></form></section><section class="panel"><div class="tablebar"><span id="tourCount" class="count">Loading…</span><button class="primary" id="printSelected" disabled>Print selected</button></div><div class="tablewrap" id="tourTable"></div></section>`;
   $('#newTour').onclick=()=>location.hash='generate';
   // Only the latest load draws the list, so a slow earlier response cannot replace a newer filter's rows.
   let safaris=[],tours=[],loads=0;
@@ -59,11 +67,13 @@ async function toursView(){
   const tourRow=t=>`<tr class="${t.issued>=t.pax?'printed-row':''}"><td><input class="tour-check" type="checkbox" value="${e(t.id)}" aria-label="Select tour ${e(t.tour_id||t.office)}" ${t.issued>=t.pax?'disabled':''}></td><td><strong>${e(t.tour_id||'—')}</strong></td><td>${e(t.its||'—')}</td><td>${e(t.office)}</td><td>${e(t.arrival)}</td><td>${e(t.departure)}${extensionChips(t.extensions)}</td><td>${e(t.pax)} <small>· ${e(t.issued)} issued</small></td><td>${printLogCell(t)}</td><td class="nowrap"><button class="replace" data-tour="${e(t.id)}" ${!t.issued?'disabled':''}>Replace cards</button> <button class="extend" data-tour="${e(t.id)}">Extend</button></td></tr>`;
   // A Safari card always prints as its QR-free sticker and can be printed again at any time.
   const safariRow=s=>`<tr class="${s.batch_id?'printed-row':''}"><td><input class="safari-check" type="checkbox" value="${e(s.id)}" aria-label="Select Safari ${e(s.office||s.tour_id||'card')}"></td><td>${s.tour_id?`<strong>${e(s.tour_id)}</strong> `:''}<span class="chip safari-chip">Safari</span></td><td>${e(s.its||'—')}</td><td>${e(s.office||'—')}</td><td>${e(s.arrival||'—')}</td><td>${e(s.departure||'—')}</td><td>${e(s.pax??'—')}</td><td>${printLogCell(s)}</td><td><button class="print-safari" data-safari="${e(s.id)}">Print sticker</button></td></tr>`;
-  const load=async()=>{const params=new URLSearchParams(new FormData($('#tourFilters'))),n=++loads;const [listed,found]=await Promise.all([api(`/tours?${params}`),api(`/safaris?${params}`)]);if(n!==loads)return;safaris=found;tours=listed;
+  const load=async()=>{const params=new URLSearchParams(new FormData($('#tourFilters'))),n=++loads;
+    // A search looks across every arrival date: a tour can arrive a day earlier or later than listed.
+    const searching=!!params.get('q').trim();if(searching)params.delete('arrival');$('#tourFilters [name=arrival]').closest('label').classList.toggle('ignored',searching);const [listed,found]=await Promise.all([api(`/tours?${params}`),api(`/safaris?${params}`)]);if(n!==loads)return;safaris=found;tours=listed;
     // Stable sort in the chosen order: Safari cards follow the tours that tie with them; undated or unnumbered cards come last.
     const sort=params.get('sort'),key=sort==='tour'?'tour_id':'arrival',flip=sort==='oldest'||sort==='tour'?1:-1;
     const rows=[...tours,...safaris.map(s=>({...s,safari:true}))].sort((a,b)=>!a[key]-!b[key]||flip*String(a[key]||'').localeCompare(String(b[key]||''),'en',{numeric:true}));
-    $('#tourCount').textContent=`${number(tours.length)} tour${tours.length===1?'':'s'}${safaris.length?` · ${number(safaris.length)} Safari`:''}`;
+    $('#tourCount').textContent=`${number(tours.length)} tour${tours.length===1?'':'s'}${safaris.length?` · ${number(safaris.length)} Safari`:''}${searching?' · all dates':''}`;
     $('#tourTable').innerHTML=rows.length?`<table><thead><tr><th><input type="checkbox" id="allTours" aria-label="Select all unprinted tours"></th><th>Tour ID</th><th>ITS</th><th>Office</th><th>Arrival</th><th>Departure</th><th>PAX</th><th>Print log</th><th>Actions</th></tr></thead><tbody>${rows.map(r=>r.safari?safariRow(r):tourRow(r)).join('')}</tbody></table>`:params.get('arrival')||params.get('q')||params.get('status')?`<div class="empty"><h2>No tours match</h2><p>Change the filters, or clear the arrival date to see every tour.</p></div>`:`<div class="empty"><h2>No tours to show</h2><p>Add a tour, or connect your Google Sheet in Settings.</p></div>`;
     const update=()=>{$('#printSelected').disabled=!$$('.tour-check:checked, .safari-check:checked').length;};
     if($('#allTours'))$('#allTours').onchange=event=>{$$('.tour-check:not(:disabled)').forEach(c=>c.checked=event.target.checked);update();};
@@ -71,7 +81,7 @@ async function toursView(){
     $$('.extend').forEach(b=>b.onclick=()=>guard(()=>extendTour(tours.find(t=>t.id===b.dataset.tour),()=>guard(load))));
     $$('.print-safari').forEach(b=>b.onclick=()=>guard(()=>busy(b,()=>printSafaris(safaris.filter(s=>s.id===b.dataset.safari)))));update();
   };
-  $('#tourFilters').onsubmit=ev=>{ev.preventDefault();guard(load);};$$('#tourFilters select').forEach(s=>s.onchange=()=>guard(load));$('#tourFilters').onreset=()=>setTimeout(()=>guard(load),0);
+  liveFilters($('#tourFilters'),load);
   $('#printSelected').onclick=()=>guard(async()=>{await busy($('#printSelected'),async()=>{
     const tourIds=$$('.tour-check:checked').map(c=>c.value),picked=$$('.safari-check:checked').map(c=>c.value);
     if(picked.length)await printSafaris(safaris.filter(s=>picked.includes(s.id)));
@@ -215,15 +225,20 @@ async function printsView(){
   $$('.retry-print').forEach(b=>b.onclick=()=>guard(()=>busy(b,async()=>{if(b.dataset.pending==='true'){await finishPdf(await api(`/batches/${b.dataset.id}/manifest`));await printsView();}else await printBatch(b.dataset.id);})));
 }
 async function logsView(){
-  $('#main').innerHTML=heading('Scan log','Every admission and declined scan, from every scanner.')+`<section class="panel"><form class="filters" id="logFilters"><label>Date<input type="date" name="date" value="${today()}"></label><label>Tour ID<input name="tour"></label><label>Office<input name="office"></label><label>Result<select name="status"><option value="">All</option><option value="green">Green · admitted</option><option value="red">Red · declined</option></select></label><button>Apply</button><button type="reset">Reset</button></form></section><section class="panel tablewrap" id="logTable"></section>`;
-  const load=async()=>{const rows=await api(`/logs?${new URLSearchParams(new FormData($('#logFilters')))}`);$('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${r.reason==='admitted'?'green-chip':'red-chip'}">${r.reason==='admitted'?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
-  $('#logFilters').onsubmit=ev=>{ev.preventDefault();guard(load);};$('#logFilters').onreset=()=>setTimeout(()=>guard(load),0);await load();
+  $('#main').innerHTML=heading('Scan log','Every admission and declined scan, from every scanner.')+`<section class="panel"><form class="filters" id="logFilters"><label>Date<input type="date" name="date" value="${today()}"></label><label>Tour ID<input name="tour"></label><label>Office<input name="office"></label><label>Result<select name="status"><option value="">All</option><option value="green">Green · admitted</option><option value="red">Red · declined</option></select></label><button type="reset">Reset</button></form></section><section class="panel tablewrap" id="logTable"></section>`;
+  // Only the latest load draws the log; a tour ID search looks across every date.
+  let loads=0;
+  const load=async()=>{const params=new URLSearchParams(new FormData($('#logFilters'))),n=++loads,searching=!!params.get('tour').trim();if(searching)params.delete('date');$('#logFilters [name=date]').closest('label').classList.toggle('ignored',searching);
+    const rows=await api(`/logs?${params}`);if(n!==loads)return;$('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${r.reason==='admitted'?'green-chip':'red-chip'}">${r.reason==='admitted'?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
+  liveFilters($('#logFilters'),load);await load();
 }
 async function summaryView(){
   $('#main').innerHTML=heading('Daily scan summary','Successful meal admissions for the selected Karbala date. Duplicate and declined scans are excluded.')+`<section class="panel"><form class="filters" id="summaryFilters"><label>Date<input type="date" name="date" value="${today()}"></label><button>Refresh</button></form></section><div id="summaryContent"></div><section class="panel" id="tourReport"></section>`;
   const meals=[['breakfast','Breakfast','Until 11:00 am'],['lunch','Lunch','11:00 am–7:00 pm'],['dinner','Dinner','From 7:00 pm']];
+  // Only the latest load draws the summary, so a slow earlier date cannot replace a newer one.
+  let loads=0;
   const load=async()=>{
-    const query=new URLSearchParams(new FormData($('#summaryFilters'))),[counts,report,currentService]=await Promise.all([api(`/summary?${query}`),api(`/summary/tours?${query}`),api('/service')]);
+    const query=new URLSearchParams(new FormData($('#summaryFilters'))),n=++loads,[counts,report,currentService]=await Promise.all([api(`/summary?${query}`),api(`/summary/tours?${query}`),api('/service')]);if(n!==loads)return;
     const compareText=(a,b)=>String(a||'').trim().localeCompare(String(b||'').trim(),'en',{sensitivity:'base',numeric:true});
     report.sort((a,b)=>compareText(a.office,b.office)||(Number(b[currentService.meal])||0)-(Number(a[currentService.meal])||0)||compareText(a.tour_id,b.tour_id)||compareText(a.id,b.id));
     $('#summaryContent').innerHTML=`<div class="metric-row">${[...meals,['scans','Daily scans','Successful admissions']].map(([key,label,hours])=>`<div class="metric"><span>${label}</span><strong data-count="${key}">${number(counts[key])}</strong><small>${hours}</small></div>`).join('')}</div>${counts.other?`<p class="status-note">${number(counts.other)} historical scans have no meal assigned and are included in the daily total.</p>`:''}`;
@@ -232,7 +247,7 @@ async function summaryView(){
     const total=key=>report.reduce((n,t)=>n+(Number(t[key])||0),0);
     $('#tourReport').innerHTML=`<h2>By tour</h2><p>Meals scanned for each tour against its PAX, for tours staying, extended or served on this date. Sorted by office, then most ${e(currentService.mealLabel.toLowerCase())} scans first.</p>${report.length?`<div class="tablewrap"><table class="report"><thead><tr><th>Tour ID</th><th>Office</th><th>PAX</th>${meals.map(([,label])=>`<th>${label}</th>`).join('')}</tr></thead><tbody>${report.map(t=>`<tr><td><strong>${e(t.tour_id||'—')}</strong>${t.extension?`<span class="ext-chip">Extended · ${e(extensionLabel[t.extension])}</span>`:''}</td><td>${e(t.office)}</td><td>${e(t.pax)}</td>${meals.map(([key])=>cell(t,key)).join('')}</tr>`).join('')}</tbody><tfoot><tr><td colspan="2">${number(report.length)} tour${report.length===1?'':'s'}</td><td>${number(total('pax'))}</td>${meals.map(([key])=>`<td>${number(total(key))}</td>`).join('')}</tr></tfoot></table></div>`:'<div class="empty"><p>No tours were staying on this date.</p></div>'}`;
   };
-  $('#summaryFilters').onsubmit=ev=>{ev.preventDefault();guard(load);};await load();
+  liveFilters($('#summaryFilters'),load);await load();
 }
 
 const megabytes = bytes => `${(bytes/1e6).toFixed(1)} MB`;

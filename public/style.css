@@ -69,6 +69,8 @@ main{padding:40px 40px 64px;max-width:1440px}
 .filters{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end}
 .filters label{min-width:190px;flex:1}
 .filters button{white-space:nowrap}
+/* A date the current search does not use: searches look across every date. */
+.filters .ignored input{opacity:.45}
 .tablewrap{overflow:auto}
 table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}
 th{font-size:.875rem;font-weight:500;color:var(--muted);padding:14px 16px;border-bottom:1px solid var(--line)}

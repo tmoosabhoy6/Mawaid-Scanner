@@ -228,7 +228,7 @@ test('tours: Show and Sort by dropdowns reload the list; Safari cards sort along
  dom=domFor(f);const w=dom.window,d=w.document,order=()=>[...d.querySelectorAll('#tourTable tbody tr td:nth-child(2) strong')].map(s=>s.textContent).join(' ');
  await allDates(w,d);
  await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
- const pick=(name,value)=>{const s=d.querySelector(`[name=${name}]`);s.value=value;s.dispatchEvent(new w.Event('change'));};
+ const pick=(name,value)=>{const s=d.querySelector(`[name=${name}]`);s.value=value;s.dispatchEvent(new w.Event('change',{bubbles:true}));};
  pick('sort','tour');await waitFor(()=>order()==='26/9 26/10 26/50 26/100');
  pick('sort','oldest');await waitFor(()=>order()==='26/9 26/10 26/50 26/100');
  pick('status','printed');await waitFor(()=>order()==='26/9');
@@ -239,6 +239,38 @@ test('tours: Show and Sort by dropdowns reload the list; Safari cards sort along
  d.querySelector('#tourFilters').reset();
  assert.equal(d.querySelector('[name=arrival]').value,karbalaToday());assert.equal(d.querySelector('[name=sort]').value,'newest');
  await allDates(w,d);await waitFor(()=>order()==='26/100 26/50 26/10 26/9');
+ }finally{dom?.window.close();f.close();}
+});
+
+test('filters apply as they change, and a tour ID search looks across every date',async()=>{
+ const f=await fixture();let dom;try{
+ const due=await tour(f,1,{tour_id:'26/9',arrival:'2026-10-21',departure:'2026-10-22'});
+ const early=await tour(f,1,{tour_id:'26/3300',arrival:'2026-10-22',departure:'2026-10-24'});
+ const dueCards=(await issue(f,due.id)).cards,earlyCards=(await issue(f,early.id)).cards;f.setTime('2026-10-21T09:30:00Z');
+ await scan(f,dueCards[0].token).expect(200);await scan(f,earlyCards[0].token).expect(200);
+ dom=domFor(f);const w=dom.window,d=w.document,order=()=>[...d.querySelectorAll('#tourTable tbody tr td:nth-child(2) strong')].map(s=>s.textContent).join(' ');
+ const set=(form,name,value,type)=>{const input=d.querySelector(`#${form} [name=${name}]`);input.value=value;input.dispatchEvent(new w.Event(type,{bubbles:true}));};
+ assert.equal(d.querySelector('#tourFilters button:not([type=reset])'),null,'no Apply button');
+ await waitFor(()=>order()==='26/9');
+ // Picking a date shows that date's arrivals straight away.
+ set('tourFilters','arrival','2026-10-22','change');await waitFor(()=>order()==='26/3300');
+ set('tourFilters','arrival','2026-10-21','change');await waitFor(()=>order()==='26/9');
+ // Typing a tour ID finds it on any arrival date, while the date stays selected for when the search is cleared.
+ set('tourFilters','q','3300','input');await waitFor(()=>order()==='26/3300');
+ assert.match(d.querySelector('#tourCount').textContent,/all dates/);assert.ok(d.querySelector('#tourFilters [name=arrival]').closest('label').classList.contains('ignored'));
+ assert.equal(d.querySelector('#tourFilters [name=arrival]').value,'2026-10-21');
+ set('tourFilters','q','','input');await waitFor(()=>order()==='26/9');
+ assert.ok(!d.querySelector('#tourFilters [name=arrival]').closest('label').classList.contains('ignored'));
+ // The scan log works the same way: a tour ID finds its scans whatever date is picked.
+ w.location.hash='logs';await waitFor(()=>d.querySelector('#logFilters'));
+ assert.equal(d.querySelector('#logFilters button:not([type=reset])'),null,'no Apply button');
+ await waitFor(()=>/26\/3300/.test(d.querySelector('#logTable').textContent));
+ set('logFilters','date','2026-10-20','change');await waitFor(()=>/No scans match/.test(d.querySelector('#logTable').textContent));
+ set('logFilters','tour','3300','input');await waitFor(()=>/26\/3300/.test(d.querySelector('#logTable').textContent));
+ set('logFilters','tour','','input');await waitFor(()=>/No scans match/.test(d.querySelector('#logTable').textContent));
+ // The daily summary follows its date without pressing Refresh.
+ w.location.hash='summary';await waitFor(()=>d.querySelector('[data-count=scans]')?.textContent==='1');
+ set('summaryFilters','date','2026-10-20','change');await waitFor(()=>d.querySelector('[data-count=scans]').textContent==='0');
  }finally{dom?.window.close();f.close();}
 });
 
