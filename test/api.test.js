@@ -133,7 +133,7 @@ test('roles, CSRF, login, validation, duplicate stays and printing setup',async(
  }finally{f.close();}
 });
 
-test('sync is authenticated, idempotent, tab-specific; changed PAX and removed tours deny access',async()=>{
+test('sync is authenticated, idempotent, tab-specific; printed cards outlast a lower PAX or removal, unprinted tours follow the Sheet',async()=>{
  const f=await fixture();try{
  const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
  const t={tour_id:'26/1',office:'Source Office',arrival:'2026-10-20',departure:'2026-10-22',pax:2};
@@ -143,10 +143,17 @@ test('sync is authenticated, idempotent, tab-specific; changed PAX and removed t
  await sync({tours:[t],tabs:['KRB - 25','Tours']}).expect(200);await sync({tours:[t]}).expect(200);
  const records=await f.admin.get('/api/tours');assert.equal(records.body.length,1);const id=records.body[0].id;
  const {cards}=await issue(f,id);f.setTime('2026-10-21T09:30:00Z');
- await sync({tours:[{...t,pax:1}]}).expect(200);assert.equal((await scan(f,cards[1].token)).body.reason,'over_capacity');
- assert.equal((await scan(f,cards[0].token)).body.status,'green');
- await sync({tours:[]}).expect(200);assert.equal((await scan(f,cards[0].token)).body.reason,'inactive_tour');
- await sync({tours:[{...t,departure:'2026-02-31'}]}).expect(400);assert.equal((await f.admin.get('/api/tours')).body.length,0);
+ // A lower PAX in the Sheet never turns a printed card red.
+ await sync({tours:[{...t,pax:1}]}).expect(200);assert.equal((await scan(f,cards[1].token)).body.status,'green');
+ assert.equal((await f.admin.get('/api/tours')).body[0].pax,2);assert.match((await f.admin.get('/api/settings')).body.sync.warnings[0],/26\/1: the Sheet has 1 PAX but 2 cards are printed/);
+ // Nor does a shorter stay: the Sheet ending it a day early keeps the printed cards' last day.
+ await sync({tours:[{...t,pax:1,departure:'2026-10-21'}]}).expect(200);assert.equal((await f.admin.get('/api/tours')).body[0].departure,'2026-10-22');
+ f.setTime('2026-10-22T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');f.setTime('2026-10-21T16:30:00Z');
+ // Nor does the tour leaving the Sheet; a tour with no cards printed is switched off.
+ const unprinted={...t,tour_id:'26/2'};await sync({tours:[{...t,pax:1},unprinted]}).expect(200);
+ await sync({tours:[]}).expect(200);assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ assert.deepEqual((await f.admin.get('/api/tours')).body.map(x=>x.tour_id),['26/1']);assert.match((await f.admin.get('/api/settings')).body.sync.warnings.join(' '),/26\/1 \(2026-10-20\): no longer in the Sheet; its 2 printed cards still work/);
+ await sync({tours:[{...t,departure:'2026-02-31'}]}).expect(400);
  }finally{f.close();}
 });
 
@@ -194,13 +201,15 @@ test('sync moves a corrected arrival with its cards, takes over a hand-typed sta
  await sync([{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:1},
   {tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]).expect(200);
  const tours=(await f.admin.get('/api/tours')).body;
- assert.deepEqual(tours.map(t=>[t.id===stay.id||t.id===manual.id,t.tour_id,t.arrival,t.issued]).sort(),[[false,'26/3401','2026-10-28',0],[true,'26/2728','2026-10-22',2],[true,'26/2846','2026-10-22',1]]);
+ assert.deepEqual(tours.map(t=>[t.id===stay.id||t.id===manual.id,t.tour_id,t.arrival,t.issued]).sort(),[[false,'26/3401','2026-10-28',0],[true,'26/2728','2026-10-21',2],[true,'26/2846','2026-10-22',1]]);
  f.setTime('2026-10-22T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
- const settings=(await f.admin.get('/api/settings')).body;assert.equal(settings.syncError,null);assert.match(settings.sync.warnings[0],/26\/3400 \(2026-10-21\): overlaps/);
+ const settings=(await f.admin.get('/api/settings')).body;assert.equal(settings.syncError,null);assert.match(settings.sync.warnings.join(' '),/26\/3400 \(2026-10-21\): overlaps/);
+ // Printed cards keep their days when the Sheet moves the arrival later.
+ assert.match(settings.sync.warnings.join(' '),/26\/2728: the Sheet has 2026-10-22 to 2026-10-24; its printed cards keep working 2026-10-21 to 2026-10-24/);
  }finally{f.close();}
 });
 
-test('sync keeps a tour the Sheet still lists but leaves out, and switches off one it removed',async()=>{
+test('sync keeps a tour the Sheet still lists but leaves out, and one with printed cards that it removed',async()=>{
  const f=await fixture();try{
  const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
  const sync=(tours,warnings=[])=>request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({...source,tours,warnings});
@@ -210,7 +219,8 @@ test('sync keeps a tour the Sheet still lists but leaves out, and switches off o
  await sync([],['26/2189: arrival and Wada PAX differ; excluded.']).expect(200);
  assert.deepEqual(active(),{'26/2189':1,'26/3025':0});f.setTime('2026-10-21T09:30:00Z');assert.equal((await scan(f,card.token)).body.status,'green');
  assert.match((await f.admin.get('/api/settings')).body.sync.warnings[0],/Kept active .*26\/2189\./);
- await sync([],['26/3025 (2026-10-24): no arrival found; excluded.']).expect(200);assert.deepEqual(active(),{'26/2189':0,'26/3025':1});
+ await sync([],['26/3025 (2026-10-24): no arrival found; excluded.']).expect(200);assert.deepEqual(active(),{'26/2189':1,'26/3025':1});
+ assert.match((await f.admin.get('/api/settings')).body.sync.warnings.join(' '),/26\/2189 \(2026-10-21\): no longer in the Sheet; its 2 printed cards still work/);
  }finally{f.close();}
 });
 

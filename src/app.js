@@ -10,7 +10,7 @@ import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queri
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
 import { offlineData } from './offline.js';
-import { planSync, skippedWarning, heldTourIds, heldWarning } from './sync-plan.js';
+import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual(Buffer.from(x), Buffer.from(y)); };
@@ -275,18 +275,18 @@ export function createApp(options = {}) {
     if (new Set(keys).size !== keys.length) throw fail('Duplicate tour stays in source; sync refused.');
     transaction(db, () => {
       const keyed = tours.filter(t => t.departure >= START_DATE).map(t => ({ ...t, id: uid(), source_key: `${s.spreadsheetId}|${s.tab}|${t.tour_id}|${t.arrival}` }));
-      const warnings = Array.isArray(req.body.warnings) ? req.body.warnings.map(String) : [];
-      const stored = db.prepare('SELECT id,tour_id,arrival,departure,office,pax,source,source_key,active FROM tours WHERE tour_id IS NOT NULL').all().map(r => ({ ...r }));
-      // A stay left out for an overlap is not switched off either, but only a Sheet warning switches a stay back on.
-      const plan = planSync(stored, keyed), held = heldTourIds(warnings), keep = [...new Set([...held, ...plan.skipped.map(t => t.tour_id)])], today = serviceAt(now()).date;
-      const kept = [...new Set(stored.filter(r => r.source === 'sheets' && keep.includes(r.tour_id) && r.departure >= today && (r.active || held.includes(r.tour_id))).map(r => r.tour_id))];
-      db.prepare("UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN (SELECT value FROM json_each(?1))) AND (tour_id IS NULL OR tour_id NOT IN (SELECT value FROM json_each(?2)))").run(JSON.stringify(keyed.map(t => t.source_key)), JSON.stringify(keep));
-      db.prepare("UPDATE tours SET active=1 WHERE source='sheets' AND active=0 AND departure>=? AND tour_id IN (SELECT value FROM json_each(?))").run(today, JSON.stringify(held));
+      const warnings = Array.isArray(req.body.warnings) ? req.body.warnings.map(String) : [], today = serviceAt(now()).date;
+      const stored = db.prepare('SELECT t.id,t.tour_id,t.arrival,t.departure,t.office,t.pax,t.source,t.source_key,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.tour_id IS NOT NULL').all().map(r => ({ ...r }));
+      const plan = planSync(stored, keyed, today), held = heldTourIds(warnings), kept = keptStays(stored, plan, held, today);
+      // Stays with printed cards are never switched off; current ones the Sheet still lists, or with cards, come back on.
+      db.prepare("UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN (SELECT value FROM json_each(?1))) AND (tour_id IS NULL OR tour_id NOT IN (SELECT value FROM json_each(?2))) AND NOT EXISTS (SELECT 1 FROM people p WHERE p.tour_id=tours.id)").run(JSON.stringify(keyed.map(t => t.source_key)), JSON.stringify(kept.keep));
+      db.prepare("UPDATE tours SET active=1 WHERE source='sheets' AND active=0 AND departure>=? AND (tour_id IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM people p WHERE p.tour_id=tours.id))").run(today, JSON.stringify(held));
       for (const { insert, update, tour } of plan.steps) {
         if (insert) db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at) VALUES(?,?,?,?,?,?,'sheets',?,?)").run(insert.id,insert.tour_id,insert.office,insert.arrival,insert.departure,insert.pax,insert.source_key,now().toISOString());
         else db.prepare("UPDATE tours SET tour_id=?,office=?,arrival=?,departure=?,pax=?,source='sheets',source_key=?,active=1 WHERE id=?").run(tour.tour_id,tour.office,tour.arrival,tour.departure,tour.pax,tour.source_key,update);
       }
-      setSetting('sync', { lastSuccess: now().toISOString(), imported: tours.length, tabs: Array.isArray(req.body.tabs) ? req.body.tabs.filter(t=>typeof t==='string').slice(0,100) : [], warnings: [...(kept.length ? [heldWarning(kept)] : []), ...plan.skipped.map(skippedWarning), ...warnings].slice(0,30) });
+      const notes = [...plan.notes, ...kept.notes];
+      setSetting('sync', { lastSuccess: now().toISOString(), imported: tours.length, tabs: Array.isArray(req.body.tabs) ? req.body.tabs.filter(t=>typeof t==='string').slice(0,100) : [], notes, warnings: [...notes, ...plan.skipped.map(skippedWarning), ...warnings].slice(0,50) });
       db.prepare("DELETE FROM settings WHERE key='syncError'").run();
     });
     res.json({ ok: true, count: tours.length });

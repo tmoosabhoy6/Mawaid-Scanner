@@ -106,15 +106,18 @@ test('Cloudflare: unfinished PDFs recover after restart; immutable PDFs are save
  }finally{await f.close();}
 });
 
-test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and removed tours deny access',async()=>{
+test('Cloudflare: unchanged sync snapshots avoid tour writes; printed cards outlast a lower PAX or removal',async()=>{
  const f=await fixture();try{
  const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
  const t={tour_id:'26/1',office:'Source',arrival:'2026-10-21',departure:'2026-10-24',pax:2};
  const sync=tours=>f.call('/sync/tours',{...source,tours},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
  assert.equal((await sync([t])).data.changedTours,1);assert.equal((await sync([t])).data.changedTours,0);
  const tour=(await f.call('/tours')).data[0],b=await f.issue(tour.id);f.setTime('2026-10-21T09:30:00Z');
- assert.equal((await sync([{...t,pax:1}])).data.changedTours,1);assert.equal((await f.scan(b.cards[1].token)).data.reason,'over_capacity');
- await sync([]);assert.equal((await f.scan(b.cards[0].token)).data.reason,'inactive_tour');
+ assert.equal((await sync([{...t,pax:1}])).data.changedTours,0);assert.equal((await f.scan(b.cards[1].token)).data.status,'green');
+ assert.equal((await sync([{...t,pax:3}])).data.changedTours,1);assert.equal((await f.call('/tours')).data[0].pax,3);
+ // A tour with printed cards outlasts its removal from the Sheet; one with none is switched off.
+ await sync([{...t,pax:3},{...t,tour_id:'26/2'}]);await sync([]);assert.equal((await f.scan(b.cards[0].token)).data.status,'green');
+ assert.deepEqual((await f.call('/tours')).data.map(x=>x.tour_id),['26/1']);
  }finally{await f.close();}
 });
 
@@ -135,7 +138,7 @@ test('Cloudflare: a corrected arrival date moves the stay with its cards, and on
   {tour_id:'26/3373',office:'Office',arrival:'2026-10-27',departure:'2026-10-29',pax:1}]);
  assert.equal(result.status,200,JSON.stringify(result.data));assert.equal(result.data.skipped,0);
  const tours=await listed();
- assert.deepEqual(tours.map(t=>[t.tour_id,t.arrival,t.departure,t.issued,t.source]).sort(),[['26/2728','2026-10-22','2026-10-24',2,'sheets'],['26/2846','2026-10-22','2026-10-24',3,'sheets'],['26/3373','2026-10-27','2026-10-29',0,'sheets']]);
+ assert.deepEqual(tours.map(t=>[t.tour_id,t.arrival,t.departure,t.issued,t.source]).sort(),[['26/2728','2026-10-21','2026-10-24',2,'sheets'],['26/2846','2026-10-22','2026-10-24',3,'sheets'],['26/3373','2026-10-27','2026-10-29',0,'sheets']]);
  assert.equal(tours.find(t=>t.tour_id==='26/2728').id,stay.id);assert.equal(tours.find(t=>t.tour_id==='26/2846').id,manual.id);
  assert.equal((await f.scan(b.cards[0].token)).data.status,'green');assert.equal((await f.scan(m.cards[2].token)).data.status,'green');
  const settings=(await f.call('/settings')).data;assert.equal(settings.syncError,null);assert.equal(settings.sync.imported,3);
@@ -145,7 +148,7 @@ test('Cloudflare: a corrected arrival date moves the stay with its cards, and on
  const kept=[{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:3},{tour_id:'26/3373',office:'Office',arrival:'2026-10-27',departure:'2026-10-29',pax:1}];
  const partial=await sync([...kept,{tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]);
  assert.equal(partial.status,200);assert.equal(partial.data.skipped,1);
- assert.ok((await listed()).some(t=>t.tour_id==='26/3401'));assert.match((await f.call('/settings')).data.sync.warnings[0],/26\/3400 \(2026-10-21\): overlaps/);
+ assert.ok((await listed()).some(t=>t.tour_id==='26/3401'));assert.match((await f.call('/settings')).data.sync.warnings.join(' '),/26\/3400 \(2026-10-21\): overlaps/);
  // The same Sheet is planned again next time, in case the stay it overlapped has been corrected.
  await f.db.prepare("DELETE FROM tours WHERE id='older'").run();
  const retried=await sync([...kept,{tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]);
@@ -167,12 +170,14 @@ test('Cloudflare: a tour the Sheet still lists but leaves out keeps its printed 
  assert.equal(half.status,200);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
  assert.equal((await f.scan(cardA.token)).data.status,'green');assert.equal((await f.scan(cardB.token)).data.status,'green');
  assert.match((await f.call('/settings')).data.sync.warnings[0],/Kept active .*26\/2189, 26\/3025/);
- // A tour gone from the Sheet altogether is still switched off.
- await sync([],['26/2189: arrival and Wada PAX differ; excluded.']);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':0});
- // Switched off by an earlier sync, then listed with a warning again: it comes back on.
- await sync([],['26/2189: arrival and Wada PAX differ; excluded.','26/3025 (2026-10-24): no arrival found; excluded.']);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
- // Once the Sheet is fixed, the tour syncs normally with its new details.
- await sync([{...a,pax:3}]);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':0});
+ // A tour gone from the Sheet altogether keeps its printed cards working too.
+ await sync([],['26/2189: arrival and Wada PAX differ; excluded.']);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
+ f.setTime('2026-10-21T16:30:00Z');assert.equal((await f.scan(cardB.token)).data.status,'green');
+ // Switched off before this rule (as on 27 October): the next sync switches it back on.
+ await f.db.prepare("UPDATE tours SET active=0 WHERE tour_id='26/3025'").run();
+ await sync([{...a,pax:3}]);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
+ // Once the Sheet is fixed, the tour syncs normally with its new details, and the note stays after an unchanged sync.
+ await sync([{...a,pax:3}]);assert.match((await f.call('/settings')).data.sync.warnings.join(' '),/26\/3025 \(2026-10-21\): no longer in the Sheet; its 1 printed cards still work/);
  assert.equal((await f.call('/tours')).data.find(t=>t.tour_id==='26/2189').pax,3);
  }finally{await f.close();}
 });

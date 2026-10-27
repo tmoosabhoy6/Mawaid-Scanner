@@ -2,7 +2,7 @@ import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId,
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
-import { planSync, skippedWarning, heldTourIds, heldWarning } from '../src/sync-plan.js';
+import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
@@ -263,23 +263,23 @@ async function syncTours(db,body,stamp){
  if(!Array.isArray(body.tours)||body.tours.length>10000)throw fail('Invalid tours payload.');
  let tours;try{tours=body.tours.map(t=>validateTour(t)).filter(t=>t.departure>=START_DATE);}catch(e){throw fail(e.message);}
  const keys=tours.map(t=>`${t.tour_id}|${t.arrival}`);if(new Set(keys).size!==keys.length)throw fail('Duplicate tour stays in source.');
- const warnings=Array.isArray(body.warnings)?body.warnings.map(String):[];
- const snapshot=await hash(JSON.stringify({source:[source.spreadsheetId,source.tab],tours:[...tours].sort((a,b)=>a.tour_id.localeCompare(b.tour_id)||a.arrival.localeCompare(b.arrival)),held:heldTourIds(warnings).sort()}));
+ const warnings=Array.isArray(body.warnings)?body.warnings.map(String):[],held=heldTourIds(warnings);
+ // v2: the first sync after the rule that printed cards keep working runs in full, so it applies that rule.
+ const snapshot=await hash(JSON.stringify({v:2,source:[source.spreadsheetId,source.tab],tours:[...tours].sort((a,b)=>a.tour_id.localeCompare(b.tour_id)||a.arrival.localeCompare(b.arrival)),held:[...held].sort()}));
  const previous=await getSetting(db,'sync',null);
- const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],warnings:warnings.slice(0,30)};
+ const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],notes:[]};
  const clearError=stmt(db,"DELETE FROM settings WHERE key='syncError'");
  // An unchanged snapshot does not touch any tour row, unless the last one left a stay out: that is planned again.
- if(previous?.snapshot===snapshot&&!previous.skipped){await db.batch([settingStmt(db,'sync',sync),clearError]);return json({ok:true,count:tours.length,changedTours:0});}
+ if(previous?.snapshot===snapshot&&!previous.skipped){sync.notes=previous.notes||[];sync.warnings=[...sync.notes,...warnings].slice(0,50);await db.batch([settingStmt(db,'sync',sync),clearError]);return json({ok:true,count:tours.length,changedTours:0});}
  const keyed=tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`}));
- const stored=await all(db,'SELECT id,tour_id,arrival,departure,office,pax,source,source_key,active FROM tours WHERE tour_id IS NOT NULL');
- // A stay left out for an overlap is not switched off either, but only a Sheet warning switches a stay back on.
- const plan=planSync(stored,keyed),held=heldTourIds(warnings),keep=[...new Set([...held,...plan.skipped.map(t=>t.tour_id)])],today=serviceAt(new Date(stamp)).date;
- const kept=[...new Set(stored.filter(r=>r.source==='sheets'&&keep.includes(r.tour_id)&&r.departure>=today&&(r.active||held.includes(r.tour_id))).map(r=>r.tour_id))];
- sync.warnings=[...(kept.length?[heldWarning(kept)]:[]),...plan.skipped.map(skippedWarning),...warnings].slice(0,30);
+ const today=serviceAt(new Date(stamp)).date,stored=await all(db,'SELECT t.id,t.tour_id,t.arrival,t.departure,t.office,t.pax,t.source,t.source_key,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.tour_id IS NOT NULL');
+ const plan=planSync(stored,keyed,today),kept=keptStays(stored,plan,held,today);
+ sync.notes=[...plan.notes,...kept.notes];sync.warnings=[...sync.notes,...plan.skipped.map(skippedWarning),...warnings].slice(0,50);
  if(plan.skipped.length)sync.skipped=plan.skipped.length;
+ // Stays with printed cards are never switched off; current ones the Sheet still lists, or with cards, come back on.
  const results=await db.batch([
- stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN(SELECT json_extract(value,'$.source_key') FROM json_each(?1))) AND (tour_id IS NULL OR tour_id NOT IN(SELECT value FROM json_each(?2)))`,JSON.stringify(keyed.map(t=>({source_key:t.source_key}))),JSON.stringify(keep)),
- stmt(db,"UPDATE tours SET active=1 WHERE source='sheets' AND active=0 AND departure>=? AND tour_id IN(SELECT value FROM json_each(?))",today,JSON.stringify(held)),
+ stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN(SELECT json_extract(value,'$.source_key') FROM json_each(?1))) AND (tour_id IS NULL OR tour_id NOT IN(SELECT value FROM json_each(?2))) AND NOT EXISTS(SELECT 1 FROM people p WHERE p.tour_id=tours.id)`,JSON.stringify(keyed.map(t=>({source_key:t.source_key}))),JSON.stringify(kept.keep)),
+ stmt(db,"UPDATE tours SET active=1 WHERE source='sheets' AND active=0 AND departure>=? AND (tour_id IN(SELECT value FROM json_each(?)) OR EXISTS(SELECT 1 FROM people p WHERE p.tour_id=tours.id))",today,JSON.stringify(held)),
  ...plan.steps.map(({insert,update,tour})=>insert
   ?stmt(db,"INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES(?,?,?,?,?,?,'sheets',?,?,1)",insert.id,insert.tour_id,insert.office,insert.arrival,insert.departure,insert.pax,insert.source_key,stamp)
   :stmt(db,"UPDATE tours SET tour_id=?,office=?,arrival=?,departure=?,pax=?,source='sheets',source_key=?,active=1 WHERE id=?",tour.tour_id,tour.office,tour.arrival,tour.departure,tour.pax,tour.source_key,update)),
