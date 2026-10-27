@@ -181,6 +181,25 @@ test('daily sync schedule, sync request and machine config enforce permissions',
 });
 
 
+test('sync moves a corrected arrival with its cards, takes over a hand-typed stay, and skips only a real overlap',async()=>{
+ const f=await fixture();try{
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ const sync=(tours,tab='Tours')=>request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({...source,tab,tours});
+ const moved={tour_id:'26/2728',office:'FH France',arrival:'2026-10-21',departure:'2026-10-24',pax:2};
+ await sync([moved]).expect(200);
+ const stay=(await f.admin.get('/api/tours')).body[0],{cards}=await issue(f,stay.id);
+ const manual=await tour(f,1,{tour_id:'2846',arrival:'2026-10-22',departure:'2026-10-23'});await issue(f,manual.id);
+ await sync([moved],'Other').expect(409);assert.match((await f.admin.get('/api/settings')).body.syncError.message,/does not match/);
+ f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES('old','26/3400','A','2026-10-20','2026-10-23',1,'sheets','old-key','x',0),('older','26/3400','A','2026-10-24','2026-10-26',1,'sheets','older-key','x',0)").run();
+ await sync([{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:1},
+  {tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]).expect(200);
+ const tours=(await f.admin.get('/api/tours')).body;
+ assert.deepEqual(tours.map(t=>[t.id===stay.id||t.id===manual.id,t.tour_id,t.arrival,t.issued]).sort(),[[false,'26/3401','2026-10-28',0],[true,'26/2728','2026-10-22',2],[true,'26/2846','2026-10-22',1]]);
+ f.setTime('2026-10-22T09:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ const settings=(await f.admin.get('/api/settings')).body;assert.equal(settings.syncError,null);assert.match(settings.sync.warnings[0],/26\/3400 \(2026-10-21\): overlaps/);
+ }finally{f.close();}
+});
+
 test('Pehli/Wada import grants all meals on Wada plus one day, then expires',async()=>{
  const f=await fixture();try{
  const context={};vm.createContext(context);vm.runInContext(readFileSync('apps-script/ToursSync.js','utf8'),context);

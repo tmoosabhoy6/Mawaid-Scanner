@@ -10,6 +10,7 @@ import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queri
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
 import { offlineData } from './offline.js';
+import { planSync, skippedWarning } from './sync-plan.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => { const x = hash(a), y = hash(b); return timingSafeEqual(Buffer.from(x), Buffer.from(y)); };
@@ -225,7 +226,7 @@ export function createApp(options = {}) {
   });
   app.get('/api/summary/tours', auth, (req, res) => res.json(db.prepare(TOUR_REPORT_SQL).all(String(req.query.date || serviceAt(now()).date))));
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
-  app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
+  app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), syncError: getSetting('syncError', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
   const archive = archiveSql(false), cutoff = value => { const today = serviceAt(now()).date; return archiveCutoff(value || today, today); };
   app.get('/api/archive', auth, (req, res) => {
     const before = cutoff(req.query.before);
@@ -263,25 +264,29 @@ export function createApp(options = {}) {
   app.post('/api/sync/request', auth, (req,res)=>{setSetting('syncRequestedAt',now().toISOString());res.json({ok:true});});
   app.post('/api/sync/tours', (req, res) => {
     if (!equal(req.headers.authorization || '', `Bearer ${config.syncToken}`)) return res.status(401).json({ error: 'Invalid sync token.' });
+    // A refused sync is kept for Settings, so a Sheet that stops reaching the app does not go unnoticed.
+    try { syncTours(req, res); } catch (err) { setSetting('syncError', { at: now().toISOString(), message: err.status ? err.message : 'The app could not save the sync.' }); throw err; }
+  });
+  function syncTours(req, res) {
     const s = source(); if (req.body.spreadsheetId !== s.spreadsheetId || req.body.tab !== s.tab) throw fail('Source workbook or tab does not match Settings.',409);
     if (!Array.isArray(req.body.tours) || req.body.tours.length > 10000) throw fail('Invalid tours payload.');
     let tours; try { tours = req.body.tours.map(t => validateTour(t)); } catch (e) { throw fail(e.message); }
     const keys = tours.map(t => `${t.tour_id}|${t.arrival}`);
     if (new Set(keys).size !== keys.length) throw fail('Duplicate tour stays in source; sync refused.');
     transaction(db, () => {
-      db.prepare("UPDATE tours SET active=0 WHERE source='sheets'").run();
-      for (const t of tours.filter(t => t.departure >= START_DATE)) {
-        const key = `${s.spreadsheetId}|${s.tab}|${t.tour_id}|${t.arrival}`;
-        const old = db.prepare('SELECT id FROM tours WHERE source_key=? OR (tour_id=? AND arrival=?)').get(key,t.tour_id,t.arrival);
-        const overlap = db.prepare('SELECT id FROM tours WHERE tour_id=? AND arrival<>? AND arrival<=? AND departure>=?').get(t.tour_id,t.arrival,t.departure,t.arrival);
-        if (overlap) throw fail('Arrival-date correction overlaps an existing stay for '+t.tour_id+'. Sync refused to avoid duplicate meal entitlements.',409);
-        if (old) db.prepare('UPDATE tours SET office=?,departure=?,pax=?,source=?,source_key=?,active=1 WHERE id=?').run(t.office,t.departure,t.pax,'sheets',key,old.id);
-        else db.prepare('INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(uid(),t.tour_id,t.office,t.arrival,t.departure,t.pax,'sheets',key,now().toISOString());
+      const keyed = tours.filter(t => t.departure >= START_DATE).map(t => ({ ...t, id: uid(), source_key: `${s.spreadsheetId}|${s.tab}|${t.tour_id}|${t.arrival}` }));
+      db.prepare("UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN (SELECT value FROM json_each(?)))").run(JSON.stringify(keyed.map(t => t.source_key)));
+      const plan = planSync(db.prepare('SELECT id,tour_id,arrival,departure,office,pax,source,source_key,active FROM tours WHERE tour_id IS NOT NULL').all().map(r => ({ ...r })), keyed);
+      for (const { insert, update, tour } of plan.steps) {
+        if (insert) db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at) VALUES(?,?,?,?,?,?,'sheets',?,?)").run(insert.id,insert.tour_id,insert.office,insert.arrival,insert.departure,insert.pax,insert.source_key,now().toISOString());
+        else db.prepare("UPDATE tours SET tour_id=?,office=?,arrival=?,departure=?,pax=?,source='sheets',source_key=?,active=1 WHERE id=?").run(tour.tour_id,tour.office,tour.arrival,tour.departure,tour.pax,tour.source_key,update);
       }
-      setSetting('sync', { lastSuccess: now().toISOString(), imported: tours.length, tabs: Array.isArray(req.body.tabs) ? req.body.tabs.filter(t=>typeof t==='string').slice(0,100) : [], warnings: Array.isArray(req.body.warnings) ? req.body.warnings.map(String).slice(0,30) : [] });
+      const warnings = Array.isArray(req.body.warnings) ? req.body.warnings.map(String) : [];
+      setSetting('sync', { lastSuccess: now().toISOString(), imported: tours.length, tabs: Array.isArray(req.body.tabs) ? req.body.tabs.filter(t=>typeof t==='string').slice(0,100) : [], warnings: [...plan.skipped.map(skippedWarning), ...warnings].slice(0,30) });
+      db.prepare("DELETE FROM settings WHERE key='syncError'").run();
     });
     res.json({ ok: true, count: tours.length });
-  });
+  }
   app.use(express.static(resolve('public'), { index: false, maxAge: '1h' }));
   app.get(['/', '/scanner'], (req, res) => res.sendFile(resolve('public/index.html')));
   app.use((err, req, res, next) => {

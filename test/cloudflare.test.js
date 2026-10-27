@@ -118,6 +118,41 @@ test('Cloudflare: unchanged sync snapshots avoid tour writes; PAX reductions and
  }finally{await f.close();}
 });
 
+test('Cloudflare: a corrected arrival date moves the stay with its cards, and one overlap never blocks the rest',async()=>{
+ const f=await fixture();try{
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ const sync=(tours,tab='Tours')=>f.call('/sync/tours',{...source,tab,tours},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
+ const moved={tour_id:'26/2728',office:'FH France',arrival:'2026-10-21',departure:'2026-10-24',pax:2};
+ assert.equal((await sync([moved])).status,200);
+ const listed=async()=>(await f.call('/tours')).data;const stay=(await listed())[0],b=await f.issue(stay.id);
+ // Typed by hand without the 26/ prefix before the Sheet listed it.
+ const manual=await f.tour(3,{tour_id:'2846',arrival:'2026-10-22',departure:'2026-10-23'}),m=await f.issue(manual.id);
+ // A refused sync is shown in Settings until the next one succeeds.
+ assert.equal((await sync([moved],'Other')).status,409);
+ assert.match((await f.call('/settings')).data.syncError.message,/does not match/);
+ f.setTime('2026-10-22T09:30:00Z');
+ const result=await sync([{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:3},
+  {tour_id:'26/3373',office:'Office',arrival:'2026-10-27',departure:'2026-10-29',pax:1}]);
+ assert.equal(result.status,200,JSON.stringify(result.data));assert.equal(result.data.skipped,0);
+ const tours=await listed();
+ assert.deepEqual(tours.map(t=>[t.tour_id,t.arrival,t.departure,t.issued,t.source]).sort(),[['26/2728','2026-10-22','2026-10-24',2,'sheets'],['26/2846','2026-10-22','2026-10-24',3,'sheets'],['26/3373','2026-10-27','2026-10-29',0,'sheets']]);
+ assert.equal(tours.find(t=>t.tour_id==='26/2728').id,stay.id);assert.equal(tours.find(t=>t.tour_id==='26/2846').id,manual.id);
+ assert.equal((await f.scan(b.cards[0].token)).data.status,'green');assert.equal((await f.scan(m.cards[2].token)).data.status,'green');
+ const settings=(await f.call('/settings')).data;assert.equal(settings.syncError,null);assert.equal(settings.sync.imported,3);
+ // An inactive stay that genuinely overlaps is left out with a warning; the other new stay still arrives.
+ await f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES('old','26/3400','A','2026-10-20','2026-10-23',1,'sheets','old-key','x',0)").run();
+ await f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES('older','26/3400','A','2026-10-24','2026-10-26',1,'sheets','older-key','x',0)").run();
+ const kept=[{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:3},{tour_id:'26/3373',office:'Office',arrival:'2026-10-27',departure:'2026-10-29',pax:1}];
+ const partial=await sync([...kept,{tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]);
+ assert.equal(partial.status,200);assert.equal(partial.data.skipped,1);
+ assert.ok((await listed()).some(t=>t.tour_id==='26/3401'));assert.match((await f.call('/settings')).data.sync.warnings[0],/26\/3400 \(2026-10-21\): overlaps/);
+ // The same Sheet is planned again next time, in case the stay it overlapped has been corrected.
+ await f.db.prepare("DELETE FROM tours WHERE id='older'").run();
+ const retried=await sync([...kept,{tour_id:'26/3400',office:'A',arrival:'2026-10-21',departure:'2026-10-25',pax:1},{tour_id:'26/3401',office:'B',arrival:'2026-10-28',departure:'2026-10-30',pax:2}]);
+ assert.equal(retried.data.skipped,0);assert.deepEqual((await listed()).filter(t=>t.tour_id==='26/3400').map(t=>[t.id,t.arrival]),[['old','2026-10-21']]);
+ }finally{await f.close();}
+});
+
 test('Cloudflare: stay dates, roles and CSRF block admission; every hour belongs to a meal',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);

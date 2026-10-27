@@ -1,8 +1,8 @@
 /**
  * Add this as a NEW file in the EXISTING spreadsheet Apps Script project.
  * Namespaced: does not define/replace doGet, flattenZiyaratSchedule, or their helpers.
- * The only trigger created is MAWAYID_refreshTours, every five minutes.
- * No existing trigger is deleted or changed.
+ * The only trigger created is MAWAYID_refreshTours, every minute. Setup replaces an earlier
+ * MAWAYID_refreshTours trigger (e.g. the old five-minute one); no other trigger is deleted or changed.
  * The MAWAYID_ prefix is kept unchanged so installed triggers and Script Properties keep working.
  *
  * Script Properties (Project Settings):
@@ -10,7 +10,7 @@
  *   MAWAYID_SYNC_TOKEN    same secret as the app's SYNC_TOKEN
  * Confirmed stay rules: arrival = Pehli Ziyarat; departure = Wada Ziyarat + 1 day.
  * Optional: MAWAYID_DAILY_TIMES     comma-separated HH:mm in Asia/Baghdad;
- *   leave blank for five-minute sync. A daily time runs in the next five-minute tick.
+ *   leave blank to sync every minute. A daily time runs in the next one-minute tick.
  * Then run MAWAYID_setupTours once and authorise Sheets / UrlFetch / triggers.
  */
 var MAWAYID_CONFIG = {
@@ -19,13 +19,18 @@ var MAWAYID_CONFIG = {
   // Verified from the live source headers: B=arrival tour ID, Q=Wada tour ID (departure is the next day).
   // Group/office, leader, and PAX follow each ID in the next three columns.
   arrivalIdColumn: 2, departureIdColumn: 17,
+  // Each day's block starts with its date in column A. Rows for days more than this long before the cutoff
+  // cannot hold a stay that reaches it, so they are not read.
+  lookbackDays: 60,
+  // An unchanged Sheet is not rewritten or sent again, except at least this often so Settings stays current.
+  heartbeatMinutes: 10,
   headers: ['Tour ID','Tour Name','Arrival Date','Departure Date','PAX Count']
 };
 function MAWAYID_setupTours() {
   MAWAYID_refreshTours(true); // Validate, write and push successfully before installing a trigger.
   var triggers = ScriptApp.getProjectTriggers();
-  for (var i=0; i<triggers.length; i++) if (triggers[i].getHandlerFunction() === 'MAWAYID_refreshTours') return;
-  ScriptApp.newTrigger('MAWAYID_refreshTours').timeBased().everyMinutes(5).create();
+  for (var i=0; i<triggers.length; i++) if (triggers[i].getHandlerFunction() === 'MAWAYID_refreshTours') ScriptApp.deleteTrigger(triggers[i]);
+  ScriptApp.newTrigger('MAWAYID_refreshTours').timeBased().everyMinutes(1).create();
 }
 function MAWAYID_refreshTours(force) {
   var props = PropertiesService.getScriptProperties();
@@ -59,7 +64,13 @@ function MAWAYID_refreshTours(force) {
     var ss = SpreadsheetApp.openById(MAWAYID_CONFIG.spreadsheetId);
     var source = ss.getSheetByName(MAWAYID_CONFIG.sourceTab);
     if (!source) throw new Error('Missing source tab '+MAWAYID_CONFIG.sourceTab);
-    var built = MAWAYID_buildTours(source.getDataRange().getDisplayValues(),MAWAYID_CONFIG);
+    var lastRow = source.getLastRow(), lastColumn = source.getLastColumn();
+    var firstRow = MAWAYID_firstRow(source.getRange(1,1,lastRow,1).getDisplayValues(), MAWAYID_addDays(MAWAYID_CONFIG.cutoff,-MAWAYID_CONFIG.lookbackDays));
+    var built = MAWAYID_buildTours(source.getRange(firstRow,1,lastRow-firstRow+1,lastColumn).getDisplayValues(),MAWAYID_CONFIG,firstRow);
+    var digest = Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify([destinationTab,built])));
+    var lastPush = Number(props.getProperty('MAWAYID_LAST_PUSH') || 0);
+    // Daily times already limit runs, so a due time always sends.
+    if (force !== true && !times && digest === props.getProperty('MAWAYID_LAST_DIGEST') && now.getTime()-lastPush < MAWAYID_CONFIG.heartbeatMinutes*60000) return;
     // Read the configured source before writing: never clear the working source or DB_SEARCHABLE.
     var sheet = ss.getSheetByName(destinationTab) || ss.insertSheet(destinationTab);
     var headers = sheet.getRange(1,1,1,5).getDisplayValues()[0];
@@ -77,8 +88,9 @@ function MAWAYID_refreshTours(force) {
     var payload = { spreadsheetId: ss.getId(), tab: sheet.getName(), tabs: ss.getSheets().map(function(s){return s.getName();}), tours: built.tours, warnings: built.warnings };
     var response = UrlFetchApp.fetch(url+'/api/sync/tours', { method:'post', contentType:'application/json',
       headers:{Authorization:'Bearer '+secret}, payload:JSON.stringify(payload), muteHttpExceptions:true });
-    if(response.getResponseCode()!==200)throw new Error('App sync failed (HTTP '+response.getResponseCode()+'). Check app source settings and token.');
+    if(response.getResponseCode()!==200)throw new Error('App sync failed (HTTP '+response.getResponseCode()+'): '+response.getContentText().slice(0,300));
     if(times && force!==true)due.forEach(function(t){props.setProperty('MAWAYID_LAST_'+t,localDate);});
+    props.setProperties({MAWAYID_LAST_DIGEST:digest,MAWAYID_LAST_PUSH:String(now.getTime())});
     Logger.log('Mawaid Tours sync: '+built.tours.length+' stays; '+built.warnings.length+' warnings.');
     built.warnings.forEach(function(w){Logger.log(w);});
   } finally { lock.releaseLock(); }
@@ -92,7 +104,14 @@ function MAWAYID_date(value) {
   if(d.getUTCMonth()!==month || d.getUTCDate()!==Number(m[2]))return null;
   return d.toISOString().slice(0,10);
 }
-function MAWAYID_buildTours(data, config) {
+// The first row of the earliest day block on or after since, from column A. Without a readable date, every row.
+function MAWAYID_firstRow(columnA, since) {
+  for (var i=0; i<columnA.length; i++) { var d = MAWAYID_date(columnA[i][0]); if (d && d >= since) return i+1; }
+  return 1;
+}
+// firstRow is the sheet row of data[0], so warnings and errors name the real source row.
+function MAWAYID_buildTours(data, config, firstRow) {
+  var offset = (firstRow || 1) - 1;
   var groups = {}, date = null, warnings = [], sawArrivalHeader=false, sawDepartureHeader=false;
   data.forEach(function(row, index){
     row.forEach(function(cell){var parsed=MAWAYID_date(cell);if(parsed)date=parsed;});
@@ -104,11 +123,11 @@ function MAWAYID_buildTours(data, config) {
       if(!/^(?:\d{2}\/\d{1,5}|\d{4})$/.test(id))return;
       var pax=Number(String(row[c+3]||'').replace(/,/g,''));
       var office=String(row[c+1]||'').trim();
-      var issue = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? 'Invalid office/PAX in source row '+(index+1)+'. Tours was not updated.' : null;
+      var issue = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? 'Invalid office/PAX in source row '+(offset+index+1)+'. Tours was not updated.' : null;
       if(!groups[id])groups[id]={arrivals:[],departures:[]};
       var events=groups[id][pair[1]], prior=events.filter(function(v){return v.date===date;})[0];
-      if(prior && (prior.pax!==pax || prior.office!==office))prior.issue='Conflicting duplicate '+id+' on '+date+' (rows '+prior.row+' and '+(index+1)+'). Tours was not updated.';
-      if(!prior)events.push({date:date,office:office,pax:pax,row:index+1,issue:issue});
+      if(prior && (prior.pax!==pax || prior.office!==office))prior.issue='Conflicting duplicate '+id+' on '+date+' (rows '+prior.row+' and '+(offset+index+1)+'). Tours was not updated.';
+      if(!prior)events.push({date:date,office:office,pax:pax,row:offset+index+1,issue:issue});
     });
   });
   if(!sawArrivalHeader||!sawDepartureHeader)throw new Error('Source columns do not match the arrival/departure headers; refusing to change Tours.');
@@ -138,7 +157,9 @@ function MAWAYID_buildTours(data, config) {
 
 function MAWAYID_sheetText(value) { return /^[=+@-]/.test(String(value)) ? "'"+value : value; }
 
-function MAWAYID_nextDay(isoDate) {
+function MAWAYID_nextDay(isoDate) { return MAWAYID_addDays(isoDate,1); }
+
+function MAWAYID_addDays(isoDate, days) {
   var parts=isoDate.split('-').map(Number);
-  return new Date(Date.UTC(parts[0],parts[1]-1,parts[2]+1)).toISOString().slice(0,10);
+  return new Date(Date.UTC(parts[0],parts[1]-1,parts[2]+days)).toISOString().slice(0,10);
 }

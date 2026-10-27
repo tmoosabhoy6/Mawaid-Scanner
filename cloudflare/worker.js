@@ -2,6 +2,7 @@ import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId,
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
+import { planSync, skippedWarning } from '../src/sync-plan.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
@@ -69,7 +70,12 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   return json({role:'admin'},200,{'Set-Cookie':`mawayid_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${url.protocol==='https:'?'; Secure':''}`});
  }
  if(path==='/api/sync/config'&&method==='GET'){await requireSync(request,env);return json({...await getSetting(db,'source',DEFAULT_SOURCE),requestedAt:await getSetting(db,'syncRequestedAt',null),lastSuccess:(await getSetting(db,'sync',null))?.lastSuccess||null});}
- if(path==='/api/sync/tours'&&method==='POST'){await requireSync(request,env);return syncTours(db,await boundedBody(request),stamp);}
+ if(path==='/api/sync/tours'&&method==='POST'){
+  await requireSync(request,env);
+  // A refused sync is kept for Settings, so a Sheet that stops reaching the app does not go unnoticed.
+  try{return await syncTours(db,await boundedBody(request),stamp);}
+  catch(error){await settingStmt(db,'syncError',{at:stamp,message:error.status?error.message:'The app could not save the sync.'}).run().catch(()=>{});throw error;}
+ }
  await authorized(request,db);
  if(path==='/api/session'&&method==='GET')return json({role:'admin'});
  if(path==='/api/logout'&&method==='POST'){
@@ -161,7 +167,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/summary/tours'&&method==='GET')return json(await all(db,TOUR_REPORT_SQL,url.searchParams.get('date')||serviceAt(clock()).date));
  if(path==='/api/settings'&&method==='GET'){
-  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
+  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }
  if(path==='/api/settings'&&method==='POST'){
   const body=await boundedBody(request,8192),statements=[];
@@ -260,17 +266,19 @@ async function syncTours(db,body,stamp){
  const snapshot=await hash(JSON.stringify({source:[source.spreadsheetId,source.tab],tours:[...tours].sort((a,b)=>a.tour_id.localeCompare(b.tour_id)||a.arrival.localeCompare(b.arrival))}));
  const previous=await getSetting(db,'sync',null);
  const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],warnings:Array.isArray(body.warnings)?body.warnings.map(String).slice(0,30):[]};
- if(previous?.snapshot===snapshot){await settingStmt(db,'sync',sync).run();return json({ok:true,count:tours.length,changedTours:0});}
- const data=JSON.stringify(tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`})));
- // An unchanged snapshot does not touch any tour row. Both update statements are conditional.
+ const clearError=stmt(db,"DELETE FROM settings WHERE key='syncError'");
+ // An unchanged snapshot does not touch any tour row, unless the last one left a stay out: that is planned again.
+ if(previous?.snapshot===snapshot&&!previous.skipped){await db.batch([settingStmt(db,'sync',sync),clearError]);return json({ok:true,count:tours.length,changedTours:0});}
+ const keyed=tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`}));
+ const plan=planSync(await all(db,'SELECT id,tour_id,arrival,departure,office,pax,source,source_key,active FROM tours WHERE tour_id IS NOT NULL'),keyed);
+ if(plan.skipped.length){sync.skipped=plan.skipped.length;sync.warnings=[...plan.skipped.map(skippedWarning),...sync.warnings].slice(0,30);}
  const results=await db.batch([
- stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN(SELECT json_extract(value,'$.source_key') FROM json_each(?)))`,data),
- stmt(db,`INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active)
- SELECT json_extract(value,'$.id'),json_extract(value,'$.tour_id'),json_extract(value,'$.office'),json_extract(value,'$.arrival'),json_extract(value,'$.departure'),json_extract(value,'$.pax'),'sheets',json_extract(value,'$.source_key'),?,1 FROM json_each(?) WHERE 1
- ON CONFLICT(tour_id,arrival) DO UPDATE SET office=excluded.office,departure=excluded.departure,pax=excluded.pax,source=excluded.source,source_key=excluded.source_key,active=1
- WHERE tours.office<>excluded.office OR tours.departure<>excluded.departure OR tours.pax<>excluded.pax OR tours.source<>'sheets' OR tours.source_key IS NOT excluded.source_key OR tours.active<>1`,stamp,data),
- settingStmt(db,'sync',sync)]);
- return json({ok:true,count:tours.length,changedTours:(results[0].meta?.changes||0)+(results[1].meta?.changes||0)});
+ stmt(db,`UPDATE tours SET active=0 WHERE source='sheets' AND active=1 AND (source_key IS NULL OR source_key NOT IN(SELECT json_extract(value,'$.source_key') FROM json_each(?)))`,JSON.stringify(keyed.map(t=>({source_key:t.source_key})))),
+ ...plan.steps.map(({insert,update,tour})=>insert
+  ?stmt(db,"INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES(?,?,?,?,?,?,'sheets',?,?,1)",insert.id,insert.tour_id,insert.office,insert.arrival,insert.departure,insert.pax,insert.source_key,stamp)
+  :stmt(db,"UPDATE tours SET tour_id=?,office=?,arrival=?,departure=?,pax=?,source='sheets',source_key=?,active=1 WHERE id=?",tour.tour_id,tour.office,tour.arrival,tour.departure,tour.pax,tour.source_key,update)),
+ settingStmt(db,'sync',sync),clearError]);
+ return json({ok:true,count:tours.length,changedTours:results.slice(0,-2).reduce((n,r)=>n+(r.meta?.changes||0),0),skipped:plan.skipped.length});
 }
 export async function respond(request,env,clock){
  try{return headers(await handleRequest(request,env,clock));}
