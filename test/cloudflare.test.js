@@ -153,6 +153,30 @@ test('Cloudflare: a corrected arrival date moves the stay with its cards, and on
  }finally{await f.close();}
 });
 
+test('Cloudflare: a tour the Sheet still lists but leaves out keeps its printed cards working',async()=>{
+ const f=await fixture();try{
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ const sync=(tours,warnings=[])=>f.call('/sync/tours',{...source,tours,warnings},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
+ const a={tour_id:'26/2189',office:'FH Mumbai',arrival:'2026-10-21',departure:'2026-10-25',pax:2},b={tour_id:'26/3025',office:'FH Mumbai',arrival:'2026-10-21',departure:'2026-10-25',pax:1};
+ assert.equal((await sync([a,b])).status,200);
+ const stays=async()=>Object.fromEntries((await f.db.prepare('SELECT tour_id,active FROM tours').all()).results.map(r=>[r.tour_id,r.active]));
+ const ids=(await f.call('/tours')).data,cardA=(await f.issue(ids.find(t=>t.tour_id==='26/2189').id)).cards[0],cardB=(await f.issue(ids.find(t=>t.tour_id==='26/3025').id)).cards[0];
+ f.setTime('2026-10-21T09:30:00Z');
+ // The office merges 26/3025 into 26/2189 on the arrival side only: the Sheet leaves both out, with warnings.
+ const half=await sync([],['26/2189: arrival and Wada PAX differ; excluded.','26/3025 (2026-10-24): no arrival found; excluded.']);
+ assert.equal(half.status,200);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
+ assert.equal((await f.scan(cardA.token)).data.status,'green');assert.equal((await f.scan(cardB.token)).data.status,'green');
+ assert.match((await f.call('/settings')).data.sync.warnings[0],/Kept active .*26\/2189, 26\/3025/);
+ // A tour gone from the Sheet altogether is still switched off.
+ await sync([],['26/2189: arrival and Wada PAX differ; excluded.']);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':0});
+ // Switched off by an earlier sync, then listed with a warning again: it comes back on.
+ await sync([],['26/2189: arrival and Wada PAX differ; excluded.','26/3025 (2026-10-24): no arrival found; excluded.']);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':1});
+ // Once the Sheet is fixed, the tour syncs normally with its new details.
+ await sync([{...a,pax:3}]);assert.deepEqual(await stays(),{'26/2189':1,'26/3025':0});
+ assert.equal((await f.call('/tours')).data.find(t=>t.tour_id==='26/2189').pax,3);
+ }finally{await f.close();}
+});
+
 test('Cloudflare: stay dates, roles and CSRF block admission; every hour belongs to a meal',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);

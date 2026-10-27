@@ -25,3 +25,8 @@ export function planSync(existing, tours) {
   return { steps, skipped };
 }
 export const skippedWarning = t => `${t.tour_id} (${t.arrival}): overlaps another stay of the same tour ID; not imported. Correct the dates in the Sheet or on the Tours page.`;
+// Tours the Sheet still lists but left out with a warning, such as a half-finished edit where the arrival and Wada
+// PAX differ. Every warning the Apps Script sends starts with the tour ID. Their current stays are kept active, or
+// switched back on, with the details of the last complete sync, so printed cards keep working until the Sheet is fixed.
+export const heldTourIds = warnings => [...new Set(warnings.map(w => /^(\d{2}\/\d{1,5}|\d{4})[\s:]/.exec(w)?.[1]).filter(Boolean))];
+export const heldWarning = ids => `Kept active with the details of the last complete sync until the Sheet is fixed: ${ids.join(', ')}.`;

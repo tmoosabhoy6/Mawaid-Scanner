@@ -200,6 +200,20 @@ test('sync moves a corrected arrival with its cards, takes over a hand-typed sta
  }finally{f.close();}
 });
 
+test('sync keeps a tour the Sheet still lists but leaves out, and switches off one it removed',async()=>{
+ const f=await fixture();try{
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ const sync=(tours,warnings=[])=>request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({...source,tours,warnings});
+ await sync([{tour_id:'26/2189',office:'FH Mumbai',arrival:'2026-10-21',departure:'2026-10-25',pax:2},{tour_id:'26/3025',office:'FH Mumbai',arrival:'2026-10-21',departure:'2026-10-25',pax:1}]).expect(200);
+ const active=()=>Object.fromEntries(f.db.prepare('SELECT tour_id,active FROM tours').all().map(r=>[r.tour_id,r.active]));
+ const card=(await issue(f,f.db.prepare("SELECT id FROM tours WHERE tour_id='26/2189'").get().id)).cards[0];
+ await sync([],['26/2189: arrival and Wada PAX differ; excluded.']).expect(200);
+ assert.deepEqual(active(),{'26/2189':1,'26/3025':0});f.setTime('2026-10-21T09:30:00Z');assert.equal((await scan(f,card.token)).body.status,'green');
+ assert.match((await f.admin.get('/api/settings')).body.sync.warnings[0],/Kept active .*26\/2189\./);
+ await sync([],['26/3025 (2026-10-24): no arrival found; excluded.']).expect(200);assert.deepEqual(active(),{'26/2189':0,'26/3025':1});
+ }finally{f.close();}
+});
+
 test('Pehli/Wada import grants all meals on Wada plus one day, then expires',async()=>{
  const f=await fixture();try{
  const context={};vm.createContext(context);vm.runInContext(readFileSync('apps-script/ToursSync.js','utf8'),context);
