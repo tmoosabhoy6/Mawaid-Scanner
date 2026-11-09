@@ -378,18 +378,22 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
  assert.equal(d.querySelector('#flash').hidden,false);assert.equal(d.querySelector('#flash').className,'flash green');
  assert.match(d.querySelector('#scanResult').textContent,/Checked offline/);assert.equal(d.querySelector('#linkChip').textContent,'Offline');
+ // The green flash clears in under a second and the next card is scanned straight away.
+ const shown=Date.now();await waitFor(()=>d.querySelector('#flash').hidden);assert.ok(Date.now()-shown<1000,`green flash stayed ${Date.now()-shown} ms`);
+ d.querySelector('#scanResult').className='scan-result';send(`MW1:${cards[1].token}`);
+ await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));assert.match(d.querySelector('#scanResult').textContent,/Person 2/);
  await new Promise(r=>setTimeout(r,3100));send(`MW1:${cards[0].token}`);
  await waitFor(()=>d.querySelector('#scanResult strong').textContent==='ALREADY SCANNED');
  assert.equal(d.querySelector('#flash').className,'flash red');assert.match(d.querySelector('#scanResult').textContent,/at 7:22 pm/);
  await new Promise(r=>setTimeout(r,1400));send('MW1:unknown');
  await waitFor(()=>/not on this phone/.test(d.querySelector('#scanResult').textContent));
- assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,3);
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,4);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
  // Back online: the next status check sends the queued scans, oldest first.
  offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
  await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
  assert.equal(f.db.prepare('SELECT meal FROM admissions').get().meal,'dinner');
- assert.deepEqual(f.db.prepare('SELECT reason,offline FROM scan_logs ORDER BY id').all().map(r=>[r.reason,r.offline]),[['admitted',1],['already_scanned',1],['unknown_card',1]]);
+ assert.deepEqual(f.db.prepare('SELECT reason,offline FROM scan_logs ORDER BY id').all().map(r=>[r.reason,r.offline]),[['admitted',1],['admitted',1],['already_scanned',1],['unknown_card',1]]);
  await waitFor(()=>d.querySelector('#linkChip').textContent==='Online');
  // Online again, a duplicate is still caught by the server.
  await new Promise(r=>setTimeout(r,1400));send(`MW1:${cards[0].token}`);

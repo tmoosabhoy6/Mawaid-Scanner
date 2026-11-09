@@ -55,3 +55,29 @@ test('Safari stickers embed the logo once and show the card dates',async()=>{
  assert.equal(safariDates('2026-10-21','2026-10-24'),'21 Oct – 24 Oct 2026');assert.equal(safariDates('2026-12-30','2027-01-02'),'30 Dec 2026 – 2 Jan 2027');
  assert.equal(safariDates('2026-10-21',null),'from 21 Oct 2026');assert.equal(safariDates(null,'2026-10-24'),'until 24 Oct 2026');assert.equal(safariDates(null,null),'');
 });
+// The tour ID prints larger than the other details, yet every line stays inside the frame and clear of its neighbours,
+// at every supported label size and with a tour ID too long to enlarge. The printed date stamp is no longer on the card.
+test('the tour ID is enlarged within the label and no text leaves the frame or overlaps',async()=>{
+ const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs'),standardFontDataUrl=new URL('../node_modules/pdfjs-dist/standard_fonts/',import.meta.url).pathname;
+ const pt=mm=>mm*72/25.4,ASC=.718,DESC=.207;
+ for(const tour_id of ['26/1234','KRB-2026/1234567890'])for(const [widthMm,heightMm] of [[40,80],[70,50.8],[76.2,50.8],[104,200]]){
+  const where=`${tour_id} on ${widthMm} × ${heightMm} mm`,pdf=await pdfjs.getDocument({data:new Uint8Array(await makeLabels([{...sample,tour_id}],{widthMm,heightMm})),isEvalSupported:false,standardFontDataUrl}).promise;
+  try{
+   assert.equal(pdf.numPages,1,where);
+   const {items}=await(await pdf.getPage(1)).getTextContent(),text=items.filter(i=>i.str.trim()).map(i=>({str:i.str,size:i.transform[0],x:i.transform[4],base:i.transform[5],width:i.width}));
+   assert.ok(!text.some(i=>/Printed/.test(i.str)),`${where}: the printed stamp is gone`);
+   // Inside the frame, which is drawn 2 mm in from each edge.
+   for(const i of text){assert.ok(i.x>=pt(2)&&i.x+i.width<=pt(widthMm-2),`${where}: "${i.str}" runs past the side of the frame`);assert.ok(i.base-i.size*DESC>=pt(2)&&i.base+i.size*ASC<=pt(heightMm-2),`${where}: "${i.str}" runs past the top or bottom of the frame`);}
+   // pdf.js merges the caption and value into one item when a long ID has fallen back to the ordinary size.
+   const merged=text.find(i=>i.str.startsWith('Tour: ')&&i.str.length>6),caption=merged||text.find(i=>i.str.trim()==='Tour:'),value=merged||text.find(i=>i!==caption&&i.str.length>1&&tour_id.startsWith(i.str.replace('…','')));
+   assert.ok(caption&&value,`${where}: tour line found`);
+   // Larger than its caption (when the ID is short enough), never smaller, and on the same baseline.
+   assert.ok(value.size>=caption.size-1e-6&&value.size<=caption.size*1.3+1e-6,`${where}: tour ID size ${value.size}`);
+   if(tour_id==='26/1234')assert.ok(value.size>caption.size*1.25,`${where}: the tour ID is enlarged`);
+   assert.ok(Math.abs(value.base-caption.base)<1e-6,`${where}: tour ID shares the caption's baseline`);
+   // Each detail line clears the next one, and the tour ID clears the society name above it.
+   const lines=['FAIZ-E-HUSAINI','Tour','Office','PAX','Arrival','Departure'].map(start=>start==='Tour'?value:text.find(i=>i.str.startsWith(start)));
+   for(let n=1;n<lines.length;n++){const above=lines[n-1],below=lines[n];assert.ok(above.base-above.size*DESC>below.base+below.size*ASC,`${where}: "${above.str}" overlaps "${below.str}"`);}
+  }finally{await pdf.destroy();}
+ }
+});

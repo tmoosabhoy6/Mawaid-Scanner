@@ -51,12 +51,22 @@ function fit(doc, text, width) {
   while (text.length > 1 && doc.widthOfString(`${text}…`) > width) text = text.slice(0, -1);
   return `${text.trimEnd()}…`;
 }
+// The tour ID prints this much larger than the other details (same weight), so it can be read at a glance.
+const TOUR_SCALE = 1.3;
+// Each line is [caption, value, scale]. A value with a scale above 1 is enlarged on the caption's baseline, shrinking
+// back towards the detail size (never below it) when a long value would not fit. Its line, and every line after it,
+// moves down by the extra height, so the larger text never reaches the rule or the QR above the block.
 function details(doc, lines, x, y, width, size, spacing) {
-  lines.forEach(([caption, value], i) => {
+  let drop = 0;
+  lines.forEach(([caption, value, scale = 1], i) => {
     bold(doc, 'Helvetica-Bold', size);
-    const captionWidth = doc.widthOfString(caption);
-    doc.text(caption, x, y + i * spacing, { ...BOLD, lineBreak: false });
-    doc.text(fit(doc, String(value), width - captionWidth), x + captionWidth, y + i * spacing, { ...BOLD, lineBreak: false });
+    const captionWidth = doc.widthOfString(caption), room = width - captionWidth, text = String(value);
+    const valueSize = scale > 1 ? Math.max(size, sizeFor(doc, 'Helvetica-Bold', text, room, size * scale)) : size;
+    const rise = doc._font.ascender / 1000 * (valueSize - size);
+    drop += rise;
+    const top = y + i * spacing + drop;
+    bold(doc, 'Helvetica-Bold', size).text(caption, x, top, { ...BOLD, lineBreak: false });
+    bold(doc, 'Helvetica-Bold', valueSize).text(fit(doc, text, room), x + captionWidth, top - rise, { ...BOLD, lineBreak: false });
   });
 }
 // Largest size (up to max) at which a full departure line fits, so dates are never truncated.
@@ -70,9 +80,8 @@ export async function drawLabels(doc, cards, settings, createQr) {
   for (const c of cards) {
     doc.addPage();
     const qr = await createQr(`MW1:${c.token}`, { errorCorrectionLevel: 'M' });
-    const printed = new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Baghdad',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(c.printed_at)).replace(',', '');
-    // Each line is its caption and value; the person's number prints as "PAX #1".
-    const lines = [['Tour: ', c.tour_id || '—'], ['Office: ', c.office], ['PAX #', c.person_no], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
+    // Each line is its caption and value; the person's number prints as "PAX #1". The tour ID is printed larger.
+    const lines = [['Tour: ', c.tour_id || '—', TOUR_SCALE], ['Office: ', c.office], ['PAX #', c.person_no], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
     const inset = onDots(mm(2));
     doc.lineWidth(LINE).strokeColor(INK).rect(inset, inset, w - inset * 2, h - inset * 2).stroke();
     if (compact) {
@@ -86,8 +95,6 @@ export async function drawLabels(doc, cards, settings, createQr) {
       doc.moveTo(x + mm(2), y).lineTo(x + colW - mm(2), y).lineWidth(LINE).strokeColor(INK).stroke();
       const spacing = mm(3.85); y += mm(1.4);
       details(doc, lines, x, y, colW, detailSize(doc, colW, 7), spacing);
-      const stamp = `Printed: ${printed} Karbala`;
-      bold(doc, 'Helvetica-Bold', sizeFor(doc, 'Helvetica-Bold', stamp, colW * .98, 5.8)).text(fit(doc, stamp, colW), x, y + lines.length * spacing + mm(.4), { ...BOLD, lineBreak: false });
     } else {
       // Portrait labels follow the reference sticker: calligraphy, society name, QR, then details.
       const textW = w - mm(10), size = detailSize(doc, textW, 11), spacing = size * 1.45;
@@ -97,14 +104,13 @@ export async function drawLabels(doc, cards, settings, createQr) {
       bold(doc, 'Helvetica-Bold', nameSize).text('FAIZ-E-HUSAINI', mm(4), y + mm(1.2), { ...BOLD, width: w - mm(8), align: 'center', characterSpacing: nameSize / 10, lineBreak: false });
       y += mm(2.4) + nameSize * 1.2;
       // Reserve the detail block and a bottom margin before sizing the QR, so a label never spills onto a second page.
+      // The extra line held in reserve covers the enlarged tour ID, which is far less than one line taller.
       const room = h - mm(5) - y - (lines.length + 1) * spacing;
       const qrSize = Math.min(w - mm(8), room), block = qrSize + (lines.length + 1) * spacing;
       y += Math.max(0, (h - mm(5) - y - block) / 2);
       drawQr(doc, qr, (w - qrSize) / 2, y, qrSize);
       y += qrSize;
       details(doc, lines, mm(5), y, textW, size, spacing);
-      const stamp = `Printed: ${printed} Karbala`;
-      bold(doc, 'Helvetica-Bold', sizeFor(doc, 'Helvetica-Bold', stamp, textW * .98, size * .75)).text(fit(doc, stamp, textW), mm(5), y + lines.length * spacing + size * .2, { ...BOLD, lineBreak: false });
     }
   }
 }

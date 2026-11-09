@@ -512,7 +512,8 @@ async function scannerView(){
     const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}`:''),result.person_no?`Person ${result.person_no}`:'',result.offline?'Checked offline':''].filter(Boolean).join(' · ');
     showResult(result.status==='green'?'green':'red',title,detail);flash(result.status==='green',title,detail);
     beep(result.status==='green',duplicate);
-    setTimeout(()=>{scannerBusy=false;},1300);
+    // After green the next card can be scanned as soon as the flash clears; the same card stays ignored for 3 s above.
+    setTimeout(()=>{scannerBusy=false;},result.status==='green'?GREEN_FLASH_MS:1300);
     setTimeout(()=>{if(Date.now()-lastAt>=4900)ready();},5000);
   }
   $('#startCamera').onclick=()=>guard(()=>busy($('#startCamera'),async()=>{
@@ -533,10 +534,12 @@ async function scannerView(){
 }
 function showResult(color,title,detail){const box=$('#scanResult');if(!box)return;box.className=`scan-result ${color}`;box.innerHTML=`<strong>${e(title)}</strong><small>${e(detail)}</small>`;}
 // A full-screen colour flash, so gate staff can see the result while watching the queue. Tap to dismiss.
+// Green clears quickly so the queue keeps moving; red stays up long enough to stop the guest.
+const GREEN_FLASH_MS=450,RED_FLASH_MS=2500;
 function flash(green,title,detail){
   const box=$('#flash');if(!box)return;
   box.className=`flash ${green?'green':'red'}`;$('strong',box).textContent=title;$('span',box).textContent=detail;box.hidden=false;
-  clearTimeout(flash.timer);flash.timer=setTimeout(()=>{box.hidden=true;},green?1200:2500);
+  clearTimeout(flash.timer);flash.timer=setTimeout(()=>{box.hidden=true;},green?GREEN_FLASH_MS:RED_FLASH_MS);
 }
 // One audio context, unlocked by the first tap: phones block sound until the page has been touched.
 let audio=null;
