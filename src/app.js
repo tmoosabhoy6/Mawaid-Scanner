@@ -4,10 +4,10 @@ import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
-import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId, SAME_TOUR_SQL, TIME_ZONE, START_DATE } from './rules.js';
+import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
-import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from './summary.js';
+import { SUMMARY_SQL, TOUR_REPORT_SQL } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
@@ -78,9 +78,9 @@ export function createApp(options = {}) {
   });
   app.post('/api/tours', auth, (req, res) => {
     let t; try { t = validateTour(req.body, { requireId: false }); } catch (e) { throw fail(e.message); }
-    // Reusing a tour ID for the same stay returns the existing entitlement instead of adding seats.
-    const existing = t.tour_id && db.prepare(SAME_TOUR_SQL).get(bareTourId(t.tour_id), t.arrival, t.departure, t.tour_id);
-    if (existing) return res.json({ ...existing, existing: true });
+    // A tour added by hand is always a new tour with its own new cards; only a tour ID already used for these dates is refused.
+    const clash = t.tour_id && db.prepare(TOUR_ID_CLASH_SQL).get(t.tour_id, t.departure, t.arrival);
+    if (clash) throw fail(tourIdClash(clash), 409);
     const id = uid(); db.prepare('INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id, t.tour_id, t.its, t.office, t.arrival, t.departure, t.pax, now().toISOString());
     res.status(201).json({ id, ...t });
   });
@@ -112,74 +112,35 @@ export function createApp(options = {}) {
     });
     res.status(201).json({ id, count: ids.length });
   });
-  // Extending a stay adds meals after departure on the same QR cards; changes keep their history.
-  app.get('/api/tours/:id/extensions', auth, (req, res) => res.json(db.prepare(EXTENSIONS_SQL).all(req.params.id)));
-  app.post('/api/tours/:id/extensions', auth, (req, res) => {
-    const tour = db.prepare('SELECT id,departure,active FROM tours WHERE id=?').get(req.params.id);
-    let x; try { x = validateExtension(req.body, tour, serviceAt(now()).date); } catch (e) { throw fail(e.message, e.status); }
-    const stamp = now().toISOString(), row = { id: uid(), tour_id: tour.id, date: x.date, meals: x.meals, created_at: stamp };
-    const current = db.prepare('SELECT * FROM tour_extensions WHERE tour_id=? AND date=? AND removed_at IS NULL').get(tour.id, x.date);
-    if (current?.meals === x.meals) return res.json({ ...current, existing: true });
-    transaction(db, () => {
-      db.prepare('UPDATE tour_extensions SET removed_at=? WHERE tour_id=? AND date=? AND removed_at IS NULL').run(stamp, tour.id, x.date);
-      db.prepare('INSERT INTO tour_extensions(id,tour_id,date,meals,created_at) VALUES(?,?,?,?,?)').run(...Object.values(row));
-    });
-    res.status(201).json(row);
-  });
-  app.post('/api/extensions/:id/remove', auth, (req, res) => {
-    if (!db.prepare('UPDATE tour_extensions SET removed_at=? WHERE id=? AND removed_at IS NULL').run(now().toISOString(), req.params.id).changes) throw fail('This extension was already removed.', 404);
-    res.json({ ok: true });
-  });
-  app.get('/api/tours/:id/people', auth, (req, res) => res.json(db.prepare(`SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no`).all(req.params.id)));
+  // Cards are only issued for people a tour does not have yet. Lost or extra cards are printed by adding a new tour.
   app.post('/api/labels', auth, async (req, res) => {
     if (typeof req.body.requestKey !== 'string' || !/^[\w-]{16,100}$/.test(req.body.requestKey)) throw fail('A valid request key is required.');
     const prior = db.prepare('SELECT id FROM batches WHERE request_key=?').get(req.body.requestKey);
     if (prior) return res.json({ id: prior.id, existing: true });
     const settings = printer(); if (!settings.confirmed) throw fail('Confirm your label dimensions in Settings before printing.');
-    const mode = req.body.personIds ? 'replacement' : 'initial';
-    const selected = mode === 'replacement' ? req.body.personIds : req.body.tourIds;
-    if (!Array.isArray(selected)) throw fail('Select tours or people.');
-    const ids = [...new Set(selected)];
-    if (!ids.length || ids.some(id => typeof id !== 'string')) throw fail('Select tours or people.');
-    if (ids.length > 500) throw fail('Print up to 500 people per batch; there is no lifetime replacement limit.');
-    const batchId = uid(), stamp = now().toISOString(); let cards = [];
+    if (!Array.isArray(req.body.tourIds)) throw fail('Select tours.');
+    const ids = [...new Set(req.body.tourIds)];
+    if (!ids.length || ids.some(id => typeof id !== 'string')) throw fail('Select tours.');
+    if (ids.length > 500) throw fail('Select up to 500 tours per print job.');
+    const batchId = uid(), stamp = now().toISOString(); const cards = [];
     for (const id of ids) {
-      if (mode === 'replacement') {
-        const person = db.prepare('SELECT p.id AS person_id,p.person_no,t.* FROM people p JOIN tours t ON t.id=p.tour_id WHERE p.id=?').get(id);
-        if (!person) throw fail('Person not found.', 404);
-        const oldCard = db.prepare('SELECT id FROM cards WHERE person_id=? AND revoked_at IS NULL').get(id);
-        if (!oldCard) throw fail('This person has no active card.',409);
-        // The replacement list records each card it showed; a card replaced since then is not replaced twice.
-        if (req.body.expectedCardIds?.[id] !== oldCard.id) throw fail('This card changed since the replacement list was opened. Refresh it before trying again.', 409);
-        if (!person.active) throw fail('This source tour is no longer active.');
-        if (person.person_no > person.pax) throw fail('Person exceeds the current tour PAX.');
-        cards.push({ ...person, id: uid(), person_id: id, tour_key: person.id, previous_card: oldCard.id, token: token(), printed_at: stamp });
-      } else {
-        const tour = db.prepare('SELECT * FROM tours WHERE id=?').get(id); if (!tour) throw fail('Tour not found.', 404);
-        if (!tour.active) throw fail('This source tour is no longer active.');
-        const count = db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n;
-        for (let n = count + 1; n <= tour.pax && cards.length < 500; n++) cards.push({ ...tour, id: uid(), tour_key: id, person_id: uid(), person_no: n, token: token(), printed_at: stamp });
-      }
+      const tour = db.prepare('SELECT * FROM tours WHERE id=?').get(id); if (!tour) throw fail('Tour not found.', 404);
+      if (!tour.active) throw fail('This source tour is no longer active.');
+      const count = db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n;
+      for (let n = count + 1; n <= tour.pax && cards.length < 500; n++) cards.push({ ...tour, id: uid(), tour_key: id, person_id: uid(), person_no: n, token: token(), printed_at: stamp });
     }
-    if (!cards.length) throw fail('All selected people already have cards. Open the print log to reprint, or replace a lost card.');
-    if (cards.length > 500) throw fail('Select a smaller batch (at most 500 labels per job). There is no total card replacement cap.');
+    if (!cards.length) throw fail('All selected people already have cards. Print them again from Print log, or add a tour for new cards.');
     const pdf = await (options.renderLabels || makeLabels)(cards, settings);
     const result = transaction(db, () => {
       const retry = db.prepare('SELECT id FROM batches WHERE request_key=?').get(req.body.requestKey); if (retry) return { id: retry.id, existing: true };
-      db.prepare('INSERT INTO batches(id,created_at,kind,request_key,pdf) VALUES(?,?,?,?,?)').run(batchId, stamp, mode, req.body.requestKey, pdf);
+      db.prepare("INSERT INTO batches(id,created_at,kind,request_key,pdf) VALUES(?,?,'initial',?,?)").run(batchId, stamp, req.body.requestKey, pdf);
       for (const c of cards) {
-        if (mode === 'initial') {
-          const latest = db.prepare('SELECT pax FROM tours WHERE id=?').get(c.tour_key);
-          if (!latest || c.person_no > latest.pax) throw fail('Tour changed while preparing labels. Refresh and try again.', 409);
-          db.prepare('INSERT INTO people VALUES(?,?,?)').run(c.person_id, c.tour_key, c.person_no);
-        } else {
-          const activeCard = db.prepare('SELECT id FROM cards WHERE person_id=? AND revoked_at IS NULL').get(c.person_id);
-          if (activeCard?.id !== c.previous_card) throw fail('This card was replaced by another operator. Refresh before trying again.',409);
-          db.prepare('UPDATE cards SET revoked_at=? WHERE person_id=? AND revoked_at IS NULL').run(stamp, c.person_id);
-        }
+        const latest = db.prepare('SELECT pax FROM tours WHERE id=?').get(c.tour_key);
+        if (!latest || c.person_no > latest.pax) throw fail('Tour changed while preparing labels. Refresh and try again.', 409);
+        db.prepare('INSERT INTO people VALUES(?,?,?)').run(c.person_id, c.tour_key, c.person_no);
         db.prepare('INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES(?,?,?,?,?)').run(c.id, c.person_id, batchId, hash(c.token), stamp);
       }
-      const remaining = mode === 'initial' ? ids.reduce((sum,id)=>sum+Math.max(0,db.prepare('SELECT pax FROM tours WHERE id=?').get(id).pax-db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n),0) : 0;
+      const remaining = ids.reduce((sum,id)=>sum+Math.max(0,db.prepare('SELECT pax FROM tours WHERE id=?').get(id).pax-db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n),0);
       return { id: batchId, count: cards.length, remaining };
     });
     res.status(201).json(result);
@@ -187,7 +148,7 @@ export function createApp(options = {}) {
   app.get('/api/batches', auth, (req, res) => res.json(db.prepare(BATCH_LIST_SQL).all()));
   app.get('/api/batches/:id/pdf', auth, (req, res) => {
     const batch = db.prepare('SELECT pdf,printer_status FROM batches WHERE id=?').get(req.params.id);
-    if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.', 410);
+    if (batch?.printer_status === 'pdf_cleared') throw fail('This label PDF was cleared after the stay ended. Add a tour to print new cards if a guest still needs one.', 410);
     if (!batch?.pdf) throw fail('PDF not found.', 404);
     res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="mawaid-${req.params.id}.pdf"` }).send(Buffer.from(batch.pdf));
   });

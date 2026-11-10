@@ -33,7 +33,7 @@ async function allDates(w,d){
  d.querySelector('[name=arrival]').value='';submit(w,d.querySelector('#tourFilters'));
 }
 
-test('tours: arrival filter, select all, print job saved despite printer unavailable, replacement selection',async()=>{
+test('tours: arrival filter, select all, print job saved despite printer unavailable; no Replace or Extend',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,2),future=await tour(f,1,{arrival:'2026-11-01',departure:'2026-11-02'});
  dom=domFor(f);const w=dom.window,d=w.document;
@@ -44,15 +44,12 @@ test('tours: arrival filter, select all, print job saved despite printer unavail
  const all=d.querySelector('#allTours');all.checked=true;all.dispatchEvent(new w.Event('change'));assert.equal(d.querySelector('#printSelected').disabled,false);
  d.querySelector('#printSelected').click();
  await waitFor(()=>f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===1);
- await waitFor(()=>d.querySelector('.replace')?.disabled===false);
+ await waitFor(()=>d.querySelector('a[href$="/pdf"]'));
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,2);
- assert.ok(d.querySelector('a[href$="/pdf"]'));assert.match(d.querySelector('#notice').textContent,/PDF saved/);
- d.querySelector('.replace').click();await waitFor(()=>d.querySelector('#peopleDialog').hasAttribute('open'));
- assert.equal(d.querySelectorAll('#peopleContent input').length,2);
- d.querySelector('#peopleContent input').checked=true;d.querySelector('#replaceSelected').click();
- await waitFor(()=>f.db.prepare('SELECT COUNT(*) AS n FROM batches').get().n===2);
- await waitFor(()=>!d.querySelector('#peopleDialog').hasAttribute('open'));
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,2);
+ assert.match(d.querySelector('#notice').textContent,/PDF saved/);
+ // Lost or extra cards are printed by adding a tour; stays are not extended.
+ assert.equal(d.querySelector('.replace'),null);assert.equal(d.querySelector('.extend'),null);
+ assert.doesNotMatch(d.querySelector('#tourTable').textContent,/Replace cards|Extend/);
  }finally{dom?.window.close();f.close();}
 });
 
@@ -190,7 +187,7 @@ test('archive & clear saves CSV folders inside Mawaid Archive, then clears only 
  await startArchive(w,d);
  const root=documents.dirs.get('Mawaid Archive');assert.ok(root);assert.equal(root.dirs.size,1);
  const [name,archive]=[...root.dirs][0];assert.match(name,/^Archive \d{4}-\d{2}-\d{2} \d{2}\.\d{2}$/);
- assert.deepEqual([...archive.files.keys()].sort(),['cards.csv','daily-meal-summary.csv','extensions.csv','meals-served.csv','print-log.csv','read-me.txt','scan-log.csv','tours.csv']);
+ assert.deepEqual([...archive.files.keys()].sort(),['cards.csv','daily-meal-summary.csv','meals-served.csv','print-log.csv','read-me.txt','scan-log.csv','tours.csv']);
  const scans=archive.files.get('scan-log.csv');assert.match(scans,/26\/3205,FH Kuwait,1,Admitted,admitted/);assert.match(scans,/Declined,unknown card/);
  assert.match(archive.files.get('daily-meal-summary.csv'),/2026-10-21,26\/3205,FH Kuwait,2,1,0,0/);
  assert.ok(![...archive.files.keys()].some(n=>n.endsWith('.pdf')));
@@ -323,24 +320,48 @@ test('By tour groups offices, then sorts most scans first for the current Karbal
  }finally{dom?.window.close();f.close();}
 });
 
-test('tours: Extend adds lunch or a whole day on the same cards, shows it on the row and keeps history',async()=>{
+test('add tour always adds a new tour with new cards; a clashing tour ID is explained',async()=>{
  const f=await fixture();let dom;try{
- const t=await tour(f,2);await issue(f,t.id);
- dom=domFor(f);const w=dom.window,d=w.document;
- await waitFor(()=>d.querySelector('.extend'));
- d.querySelector('.extend').click();await waitFor(()=>d.querySelector('#extendDate'));
- assert.ok(d.querySelector('#peopleDialog').hasAttribute('open'));assert.equal(d.querySelector('#extendDate').value,'2026-10-24');
- assert.match(d.querySelector('#peopleContent').textContent,/nothing new to print/);
- d.querySelector('[data-meals=lunch]').click();
- await waitFor(()=>d.querySelector('.remove-extension'));
- assert.deepEqual(f.db.prepare('SELECT date,meals FROM tour_extensions').all().map(r=>({...r})),[{date:'2026-10-24',meals:'lunch'}]);
- await waitFor(()=>/\+ Sat 24 Oct · Lunch/.test(d.querySelector('#tourTable').textContent));
- d.querySelector('[data-meals=day]').click();
- await waitFor(()=>d.querySelectorAll('.extension-list li').length===2);
- assert.match(d.querySelector('.extension-list li.removed').textContent,/Lunch only/);
- await waitFor(()=>/\+ Sat 24 Oct · All day/.test(d.querySelector('#tourTable').textContent));
- d.querySelector('.remove-extension').click();await waitFor(()=>!d.querySelector('.remove-extension'));
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tour_extensions WHERE removed_at IS NULL').get().n,0);
+ const listed=await tour(f,2);await issue(f,listed.id);
+ dom=domFor(f,'/#generate');const w=dom.window,d=w.document;
+ await waitFor(()=>d.querySelector('#addTour'));
+ assert.doesNotMatch(d.querySelector('#addTour').textContent,/Replace cards/);assert.match(d.querySelector('#addTour').textContent,/Tour ID \(optional\)/);
+ const form=d.querySelector('#addTour'),fill=values=>{for(const [key,value] of Object.entries(values))form.querySelector(`[name=${key}]`).value=value;};
+ fill({tour_id:'26/3205',office:'FH Kuwait',pax:'1',arrival:'2026-10-21',departure:'2026-10-23'});
+ submit(w,form,form.querySelector('[value=save]'));
+ await waitFor(()=>/Tour ID 26\/3205 is already used for 2026-10-21 to 2026-10-23/.test(d.querySelector('#notice').textContent));
+ assert.equal(d.querySelector('#peopleDialog').hasAttribute('open'),false);
+ fill({tour_id:''});submit(w,form,form.querySelector('[value=save]'));
+ await waitFor(()=>f.db.prepare('SELECT COUNT(*) AS n FROM tours').get().n===2);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tours WHERE tour_id IS NULL AND pax=1').get().n,1);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('scanner camera: a card held up keeps its green result and is not read again as ALREADY SCANNED',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:30:00Z');// Lunch in Karbala.
+ dom=new JSDOM(html,{url:'https://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window,d=w.document;let decode;
+ w.fetch=async(url,options={})=>{const path=new URL(url,w.location.href).pathname+new URL(url,w.location.href).search;let req=options.method==='POST'?f.scanner.post(path):f.scanner.get(path);if(options.body)req=req.send(JSON.parse(options.body));const r=await req;return{ok:r.status<300,status:r.status,json:async()=>r.body};};
+ Object.defineProperty(w,'isSecureContext',{value:true});
+ w.MawaidCamera=class{async start(camera,config,onDecode){decode=onDecode;}async stop(){}clear(){}};
+ w.eval(js);
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ d.querySelector('#startCamera').click();await waitFor(()=>decode);
+ const logs=()=>f.db.prepare('SELECT reason FROM scan_logs ORDER BY id').all().map(r=>r.reason);
+ // The guest holds the card in front of the camera for 4.5 s: the camera reads it over and over.
+ const held=`MW1:${cards[0].token}`;
+ for(let n=0;n<45;n++){decode(held);await new Promise(r=>setTimeout(r,100));}
+ assert.deepEqual(logs(),['admitted']);
+ assert.equal(d.querySelector('#scanResult strong').textContent,'ALLOW');assert.ok(d.querySelector('#scanResult').classList.contains('green'));
+ // The next guest's card is checked straight away, even while the first is still in view.
+ decode(held);decode(`MW1:${cards[1].token}`);
+ await waitFor(()=>logs().length===2);assert.deepEqual(logs(),['admitted','admitted']);
+ // Out of view for longer than the wait, then shown again: a real second attempt is still caught and timed.
+ await new Promise(r=>setTimeout(r,8200));decode(held);
+ await waitFor(()=>d.querySelector('#scanResult strong')?.textContent==='ALREADY SCANNED');
+ assert.match(d.querySelector('#scanResult').textContent,/at 12:30 pm \(0 s ago\)/);
+ assert.deepEqual(logs(),['admitted','admitted','already_scanned']);
  }finally{dom?.window.close();f.close();}
 });
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { fixture,tour,issue,scan,config } from './helpers.js';
+import { fixture,tour,issue,scan,config,replaceCard } from './helpers.js';
 import { writeFileSync,mkdirSync,readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { makeSafariLabels } from '../src/labels.js';
@@ -27,28 +27,27 @@ test('50 unique cards; one admission per meal across concurrent scans',async()=>
  }finally{f.close();}
 });
 
-test('five lost cards keep 50 people and revoke the originals',async()=>{
+test('cards are never replaced: a new tour gives guests new cards and their first cards keep working',async()=>{
  const f=await fixture();try{
- const t=await tour(f,50),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:30:00Z');
- await Promise.all(cards.slice(0,5).map(c=>scan(f,c.token)));
- const ids=cards.slice(0,5).map(c=>c.person_id);
- await f.admin.post('/api/labels').send({personIds:ids,expectedCardIds:Object.fromEntries(cards.slice(0,5).map(c=>[c.person_id,c.id])),requestKey:randomUUID()}).expect(201);
- const replacements=f.rendered.at(-1);assert.equal(replacements.length,5);
- for(const c of cards.slice(0,5))assert.equal((await scan(f,c.token)).body.reason,'replaced_card');
- for(const c of replacements)assert.equal((await scan(f,c.token)).body.reason,'already_scanned');
- await Promise.all(cards.slice(5).map(c=>scan(f,c.token)));
- const summary=await f.admin.get('/api/summary?date=2026-10-21').expect(200);assert.equal(summary.body.lunch,50);assert.equal(summary.body.scans,50);
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,50);
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:30:00Z');
+ assert.equal((await scan(f,cards[0].token)).body.status,'green');
+ // The replacement request is gone: it is refused and revokes nothing.
+ await f.admin.post('/api/labels').send({personIds:[cards[0].person_id],expectedCardIds:{[cards[0].person_id]:cards[0].id},requestKey:randomUUID()}).expect(400);
+ await f.admin.get(`/api/tours/${t.id}/people`).expect(404);
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NOT NULL').get().n,0);
+ // Adding the guests as a new tour prints new cards; the old cards still work.
+ const extra=(await f.admin.post('/api/tours').send({office:'FH Kuwait',pax:2,arrival:'2026-10-21',departure:'2026-10-23'}).expect(201)).body;
+ const fresh=(await issue(f,extra.id)).cards;assert.equal(fresh.length,2);
+ for(const c of fresh)assert.equal((await scan(f,c.token)).body.status,'green');
+ assert.equal((await scan(f,cards[1].token)).body.status,'green');
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,5);
  }finally{f.close();}
 });
 
-test('unlimited replacement iterations; unused entitlement works on newest code only',async()=>{
+test('cards replaced before replacing was removed stay red; the newest card works',async()=>{
  const f=await fixture();try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);let previous=cards[0];f.setTime('2026-10-21T09:30:00Z');
- for(let n=0;n<12;n++){
- await f.admin.post('/api/labels').send({personIds:[previous.person_id],expectedCardIds:{[previous.person_id]:previous.id},requestKey:randomUUID()}).expect(201);
- assert.equal((await scan(f,previous.token)).body.reason,'replaced_card');previous=f.rendered.at(-1)[0];
- }
+ for(let n=0;n<3;n++){const next=replaceCard(f,previous);assert.equal((await scan(f,previous.token)).body.reason,'replaced_card');previous=next;}
  assert.equal((await scan(f,previous.token)).body.status,'green');
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,1);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NULL').get().n,1);
@@ -66,16 +65,13 @@ test('idempotency prevents new cards, admissions and logs on network retries',as
  }finally{f.close();}
 });
 
-test('two operators cannot issue overlapping initial cards or replacements',async()=>{
+test('two operators cannot issue overlapping cards',async()=>{
  const f=await fixture();try{
  const t=await tour(f,1);
  const results=await Promise.all(Array.from({length:2},()=>f.admin.post('/api/labels').send({tourIds:[t.id],requestKey:randomUUID()})));
  // The losing operator sees either a conflict or "already has cards", depending on interleaving.
  assert.equal(results.filter(r=>r.status===201).length,1);assert.ok(results.some(r=>r.status===409||r.status===400));
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,1);
- const person=f.db.prepare('SELECT p.id,c.id AS card_id FROM people p JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL').get();
- const replacements=await Promise.all(Array.from({length:2},()=>f.admin.post('/api/labels').send({personIds:[person.id],expectedCardIds:{[person.id]:person.card_id},requestKey:randomUUID()})));
- assert.deepEqual(replacements.map(r=>r.status).sort(),[201,409]);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NULL').get().n,1);
  }finally{f.close();}
 });
@@ -98,8 +94,7 @@ test('breakfast admits every card for reporting, counting each person once',asyn
  const f=await fixture();try{
  const due=await tour(f,1),early=await tour(f,2,{tour_id:'26/77',arrival:'2026-10-22',departure:'2026-10-24'}),gone=await tour(f,1,{tour_id:'26/78',arrival:'2026-10-18',departure:'2026-10-20'});
  const dueCard=(await issue(f,due.id)).cards[0],earlyCards=(await issue(f,early.id)).cards,goneCard=(await issue(f,gone.id)).cards[0];
- await f.admin.post('/api/labels').send({personIds:[dueCard.person_id],expectedCardIds:{[dueCard.person_id]:dueCard.id},requestKey:randomUUID()}).expect(201);
- const newCard=f.rendered.at(-1)[0];
+ const newCard=replaceCard(f,dueCard);
  f.setTime('2026-10-21T04:00:00Z');// 7:00 am in Karbala.
  const reasons=[];for(const code of [dueCard.token,newCard.token,earlyCards[0].token,earlyCards[1].token,earlyCards[0].token,goneCard.token,'not-a-card']){const r=(await scan(f,code)).body;assert.equal(r.status,'green');reasons.push(r.reason);}
  // The replaced card counts the person; their new card is a repeat. Early and late stays count too.
@@ -123,7 +118,7 @@ test('roles, CSRF, login, validation, duplicate stays and printing setup',async(
  await f.admin.post('/api/tours').set('Origin','https://other.example').send({}).expect(403);
  await request(f.app).post('/api/login').send({role:'admin',password:'wrong'}).expect(401);
  await f.admin.post('/api/tours').send({tour_id:'x'}).expect(400);
- const t=await tour(f,2);const duplicate=await f.admin.post('/api/tours').send({...t,pax:5}).expect(200);assert.equal(duplicate.body.existing,true);assert.equal(duplicate.body.pax,2);
+ const t=await tour(f,2);const duplicate=await f.admin.post('/api/tours').send({...t,pax:5}).expect(409);assert.match(duplicate.body.error,/already used for 2026-10-21 to 2026-10-23.*Leave the tour ID blank/);
  const other=await tour(f,1,{arrival:'2026-11-01',departure:'2026-11-02'});assert.notEqual(other.id,t.id);
  await f.admin.post('/api/labels').send({requestKey:randomUUID()}).expect(400);
  const defaults=await f.admin.get('/api/settings').expect(200);assert.equal(defaults.body.printer.widthMm,76.2);assert.equal(defaults.body.printer.heightMm,50.8);
@@ -293,13 +288,16 @@ test('tour ID and ITS are optional; tours without an ID never merge and still pr
  const {cards}=await issue(f,a.body.id);assert.equal(cards[0].tour_id,null);assert.equal((await scan(f,cards[0].token)).body.status,'green');
  const logs=(await f.admin.get('/api/logs').expect(200)).body;assert.equal(logs[0].display_tour,null);
  assert.equal((await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body.scans,1);
- // A tour ID entered again for the same arrival still finds the existing stay.
- const named=await tour(f,1);assert.equal((await f.admin.post('/api/tours').send({...named,its:'1'}).expect(200)).body.id,named.id);
- // Typing the tour ID without the Sheet's year prefix, for an overlapping stay, finds the same tour.
+ // A tour ID already used for overlapping dates is refused with a clear reason; nothing is merged.
+ const named=await tour(f,1);
+ assert.match((await f.admin.post('/api/tours').send({...named,its:'1'}).expect(409)).body.error,/Tour ID 26\/3205 is already used/);
+ assert.equal((await f.admin.post('/api/tours').send({...named,arrival:'2026-10-23',departure:'2026-10-25'}).expect(409)).status,409);
+ // Every tour added by hand is a new tour with its own cards, even with the Sheet's ID typed without 26/.
  const sheet=(await f.admin.post('/api/tours').send({...base,tour_id:'26/2849',arrival:'2026-10-21',departure:'2026-10-24',pax:3}).expect(201)).body;
- const again=(await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-24',departure:'2026-10-24',pax:2}).expect(200)).body;
- assert.equal(again.id,sheet.id);assert.equal(again.pax,3);assert.equal(again.issued,0);
- await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-26',departure:'2026-10-27'}).expect(201);
+ const again=(await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-24',departure:'2026-10-24',pax:2}).expect(201)).body;
+ assert.notEqual(again.id,sheet.id);assert.equal(again.pax,2);assert.equal(again.existing,undefined);
+ assert.equal((await issue(f,again.id)).cards.length,2);
+ await f.admin.post('/api/tours').send({...base,tour_id:'26/3205',arrival:'2026-10-26',departure:'2026-10-27'}).expect(201);
  }finally{f.close();}
 });
 

@@ -1,15 +1,13 @@
 // Gate phones keep a copy of the cards of current stays, so they can keep checking cards when the Wi-Fi drops.
 // The first download holds every current card and today's meals; after that each minute's poll reads only
-// cards and meals added since the phone's cursors. A replacement always adds a card, so a phone that receives
-// a person's new card treats that person's older cards as replaced. Tours and extensions are small and are
-// re-read every few minutes. Only random card hashes, dates and person numbers are sent — no names or offices.
-const CURRENT_TOURS = `SELECT id FROM tours WHERE departure>=?1
-  UNION SELECT tour_id FROM tour_extensions WHERE date>=?1 AND removed_at IS NULL`;
+// cards and meals added since the phone's cursors. A person whose card was replaced (in the past) has a newer card,
+// so a phone that receives a person's new card treats that person's older cards as replaced. Tours are small and
+// are re-read every few minutes. Only random card hashes, dates and person numbers are sent — no names or offices.
+const CURRENT_TOURS = 'SELECT id FROM tours WHERE departure>=?1';
 export const OFFLINE_SQL = {
   cardCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM cards',
   admissionCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM admissions',
   tours: `SELECT t.id,t.arrival,t.departure,t.pax,t.active FROM tours t WHERE t.id IN (${CURRENT_TOURS})`,
-  extensions: 'SELECT tour_id,date,meals FROM tour_extensions WHERE date>=?1 AND removed_at IS NULL',
   allCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked
     FROM people p JOIN cards c ON c.person_id=p.id WHERE p.tour_id IN (${CURRENT_TOURS}) AND c.rowid<=?2`,
   newCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked
@@ -31,7 +29,6 @@ export async function offlineData(all, url, service, hashFormat) {
     admissions: admissions.map(a => [a.person_id, a.meal]) };
   if (withTours) {
     data.tours = (await all(OFFLINE_SQL.tours, today)).map(t => [t.id, t.arrival, t.departure, t.pax, t.active ? 1 : 0]);
-    data.extensions = (await all(OFFLINE_SQL.extensions, today)).map(x => [x.tour_id, x.date, x.meals]);
   }
   return data;
 }

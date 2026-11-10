@@ -32,7 +32,15 @@ async function fixture(overrides={},migrations=MIGRATIONS){
  const tour=async(pax=2,extra={})=>{const r=await call('/tours',{tour_id:'26/1',office:'Test office',arrival:'2026-10-21',departure:'2026-10-24',pax,...extra});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const issue=async(id,key=randomUUID())=>{const r=await call('/labels',{tourIds:[id],requestKey:key});assert.equal(r.status,201,JSON.stringify(r.data));return r.data;};
  const scan=(token,key=randomUUID())=>call('/scan',{code:'MW1:'+token,requestKey:key},'scanner');
- return{mf,db,call,tour,issue,scan,cookies,setTime(value){now=value;},close:()=>mf.dispose()};
+ // Replacing cards is no longer offered; this recreates a card replaced earlier, as the live database still holds them.
+ const replaceCard=async card=>{
+  const batch=randomUUID(),id=randomUUID(),token=randomUUID();
+  await db.batch([db.prepare("INSERT INTO batches(id,created_at,kind,request_key) VALUES(?,?,'replacement',?)").bind(batch,now,batch),
+   db.prepare('UPDATE cards SET revoked_at=? WHERE person_id=? AND revoked_at IS NULL').bind(now,card.person_id),
+   db.prepare('INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES(?,?,?,?,?)').bind(id,card.person_id,batch,await hash(token),now)]);
+  return{...card,id,token};
+ };
+ return{mf,db,call,tour,issue,scan,replaceCard,cookies,setTime(value){now=value;},close:()=>mf.dispose()};
 }
 
 test('Cloudflare: only the administrator signs in; the scanner works without a session',async()=>{
@@ -66,15 +74,19 @@ test('Cloudflare: four phones scanning one card produce exactly one green; a rep
  }finally{await f.close();}
 });
 
-test('Cloudflare: replacement revokes old codes; retries reuse tokens',async()=>{
+test('Cloudflare: retries reuse tokens; replacing is refused; cards replaced earlier stay red',async()=>{
  const f=await fixture();try{
  const t=await f.tour(2),key=randomUUID(),b=await f.issue(t.id,key);
  const retry=await f.call('/labels',{tourIds:[t.id],requestKey:key});assert.equal(retry.data.cards[0].token,b.cards[0].token);
  f.setTime('2026-10-21T09:30:00Z');await f.scan(b.cards[0].token);
- const replace=await f.call('/labels',{personIds:b.cards.map(c=>c.person_id),expectedCardIds:Object.fromEntries(b.cards.map(c=>[c.person_id,c.id])),requestKey:randomUUID()});assert.equal(replace.status,201);
- for(const c of b.cards)assert.equal((await f.scan(c.token)).data.reason,'replaced_card');
- assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[0].person_id).token)).data.reason,'already_scanned');
- assert.equal((await f.scan(replace.data.cards.find(c=>c.person_id===b.cards[1].person_id).token)).data.status,'green');
+ const replace=await f.call('/labels',{personIds:b.cards.map(c=>c.person_id),expectedCardIds:Object.fromEntries(b.cards.map(c=>[c.person_id,c.id])),requestKey:randomUUID()});
+ assert.equal(replace.status,400);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NOT NULL').first()).n,0);
+ assert.equal((await f.call(`/tours/${t.id}/people`)).status,404);
+ assert.match((await f.call('/labels',{tourIds:[t.id],requestKey:randomUUID()})).data.error,/add a tour for new cards/);
+ const newer=await f.replaceCard(b.cards[0]);
+ assert.equal((await f.scan(b.cards[0].token)).data.reason,'replaced_card');
+ assert.equal((await f.scan(newer.token)).data.reason,'already_scanned');
+ assert.equal((await f.scan(b.cards[1].token)).data.status,'green');
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM people').first()).n,2);
  }finally{await f.close();}
 });
@@ -84,10 +96,7 @@ test('Cloudflare: competing print operators roll back an overlapping allocation'
  const t=await f.tour(1);const jobs=await Promise.all([1,2].map(()=>f.call('/labels',{tourIds:[t.id],requestKey:randomUUID()})));
  assert.equal(jobs.filter(r=>r.status===201).length,1);assert.ok(jobs.some(r=>r.status===409||r.status===400));
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM cards').first()).n,1);
- const person=await f.db.prepare('SELECT p.id,c.id AS card_id FROM people p JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL').first();
- const replacements=await Promise.all([1,2].map(()=>f.call('/labels',{personIds:[person.id],expectedCardIds:{[person.id]:person.card_id},requestKey:randomUUID()})));
- assert.equal(replacements.filter(r=>r.status===201).length,1);assert.ok(replacements.some(r=>r.status===409));
- assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NULL').first()).n,1);
+ assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM people').first()).n,1);
  }finally{await f.close();}
 });
 
@@ -270,11 +279,15 @@ test('Cloudflare: optional tour ID and ITS; Safari cards are stored without QR c
  assert.equal(a.status,201);assert.equal(b.status,201);assert.equal(a.data.tour_id,null);assert.notEqual(a.data.id,b.data.id);
  assert.deepEqual((await f.call('/tours?q=30412345')).data.map(t=>t.id),[a.data.id]);
  const issued=await f.issue(a.data.id);assert.equal(issued.cards[0].tour_id,null);assert.equal((await f.scan(issued.cards[0].token)).data.status,'green');
- assert.equal((await f.call('/tours',{...base,tour_id:'26/9'})).status,201);assert.equal((await f.call('/tours',{...base,tour_id:'26/9',pax:4})).data.existing,true);
- // The Sheet's 26/ prefix left off, with other but overlapping dates, still finds the listed tour; a later stay is new.
- const listed=(await f.call('/tours',{...base,tour_id:'26/9'})).data,bare=(await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-23',departure:'2026-10-23'})).data;
- assert.equal(bare.existing,true);assert.equal(bare.id,listed.id);assert.equal(bare.issued,0);
- assert.equal((await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-25',departure:'2026-10-26'})).status,201);
+ const listed=await f.call('/tours',{...base,tour_id:'26/9'});assert.equal(listed.status,201);
+ // A tour ID already used for overlapping dates is refused with a clear reason, never merged into the listed tour.
+ const clash=await f.call('/tours',{...base,tour_id:'26/9',pax:4,arrival:'2026-10-23',departure:'2026-10-26'});
+ assert.equal(clash.status,409);assert.match(clash.data.error,/Tour ID 26\/9 is already used for 2026-10-21 to 2026-10-24/);
+ // Every tour added by hand is new, with its own cards, even with the Sheet's ID typed without 26/.
+ const bare=await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-23',departure:'2026-10-23',pax:2});
+ assert.equal(bare.status,201);assert.notEqual(bare.data.id,listed.data.id);assert.equal(bare.data.existing,undefined);
+ assert.equal((await f.issue(bare.data.id)).cards.length,2);
+ assert.equal((await f.call('/tours',{...base,tour_id:'26/9',arrival:'2026-10-25',departure:'2026-10-26'})).status,201);
  const safari=await f.call('/safaris',{office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12});assert.equal(safari.status,201);
  assert.equal((await f.call('/safaris',{})).status,201);assert.equal((await f.call('/safaris',{pax:-1})).status,400);
  assert.deepEqual((await f.call('/safaris?q=izan')).data.map(s=>s.id),[safari.data.id]);assert.equal((await f.call('/safaris')).data.length,2);
@@ -408,28 +421,25 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  }finally{await f.close();}
 });
 
-test('Cloudflare: extended stays, offline scans, the phone card list and the tour report',async()=>{
+test('Cloudflare: stays end on departure, offline scans, the phone card list and the tour report',async()=>{
  const f=await fixture();try{
  const t=await f.tour(2),b=await f.issue(t.id),[one,two]=b.cards;
  // The phone's list holds base64 card hashes and no office names.
  const full=(await f.call('/scanner/data',undefined,'scanner')).data;
  assert.equal(full.hash,'base64');assert.deepEqual(full.cards.map(c=>c[0]).sort(),[await hash(one.token),await hash(two.token)].sort());assert.ok(!JSON.stringify(full).includes('Test office'));
- assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'},'scanner')).status,401);
- assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-24',meals:'lunch'})).status,400);
- const ext=await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'});assert.equal(ext.status,201);
- f.setTime('2026-10-25T16:30:00Z');assert.equal((await f.scan(one.token)).data.reason,'extension_other_meal');
- f.setTime('2026-10-25T09:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
+ assert.equal(full.extensions,undefined);
+ // Extending a stay is no longer offered.
+ assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'})).status,404);
+ f.setTime('2026-10-24T09:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
  const dup=await f.scan(one.token);assert.equal(dup.data.reason,'already_scanned');assert.equal(dup.data.firstScannedAt,green.data.scanned_at);
- f.setTime('2026-10-26T09:00:00Z');assert.equal((await f.scan(one.token)).data.reason,'after_departure');
+ f.setTime('2026-10-25T09:00:00Z');const ended=await f.scan(one.token);assert.deepEqual([ended.data.reason,ended.data.message],['after_departure','Stay has ended']);
  // An offline phone's lunch scan from yesterday is counted for yesterday.
- const offline=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-25T09:30:00Z',offlineStatus:'green'},'scanner');
- assert.deepEqual([offline.data.reason,offline.data.date,offline.data.meal,offline.data.offline],['admitted','2026-10-25','lunch',1]);
+ const offline=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-24T09:30:00Z',offlineStatus:'green'},'scanner');
+ assert.deepEqual([offline.data.reason,offline.data.date,offline.data.meal,offline.data.offline],['admitted','2026-10-24','lunch',1]);
  const declined=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-21T09:30:00Z',offlineStatus:'green'},'scanner');assert.equal(declined.status,400);
- const report=(await f.call('/summary/tours?date=2026-10-25')).data;
- assert.deepEqual(report.map(r=>[r.tour_id,r.extension,r.breakfast,r.lunch,r.dinner]),[['26/1','lunch',0,2,0]]);
- assert.equal((await f.call('/summary?date=2026-10-25')).data.lunch,2);
- assert.equal((await f.call(`/extensions/${ext.data.id}/remove`,{})).status,200);
- assert.equal((await f.call(`/tours/${t.id}/extensions`)).data[0].removed_at!==null,true);
- assert.equal((await f.call('/archive/extensions?before=2026-10-26')).data.rows.length,1);
+ const report=(await f.call('/summary/tours?date=2026-10-24')).data;
+ assert.deepEqual(report.map(r=>[r.tour_id,r.breakfast,r.lunch,r.dinner]),[['26/1',0,2,0]]);
+ assert.equal((await f.call('/summary?date=2026-10-24')).data.lunch,2);
+ assert.equal((await f.call('/archive/extensions?before=2026-10-25')).status,404);
  }finally{await f.close();}
 });

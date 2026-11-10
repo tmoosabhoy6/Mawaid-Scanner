@@ -23,3 +23,12 @@ export async function issue(f,id) {
   return {batch:response.body,cards:f.rendered.at(-1)};
 }
 export function scan(f,code,key=randomUUID()){return f.scanner.post('/api/scan').send({code:`MW1:${code}`,requestKey:key});}
+// Replacing cards is no longer offered, but the live database still holds cards replaced earlier.
+// This recreates one: the person's current card is revoked and a newer card is added for them.
+export function replaceCard(f,card){
+  const stamp=f.getTime().toISOString(),batch=randomUUID(),id=randomUUID(),token=randomUUID();
+  f.db.prepare("INSERT INTO batches(id,created_at,kind,request_key) VALUES(?,?,'replacement',?)").run(batch,stamp,batch);
+  f.db.prepare('UPDATE cards SET revoked_at=? WHERE person_id=? AND revoked_at IS NULL').run(stamp,card.person_id);
+  f.db.prepare('INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES(?,?,?,?,?)').run(id,card.person_id,batch,createHash('sha256').update(token).digest('hex'),stamp);
+  return {...card,id,token};
+}

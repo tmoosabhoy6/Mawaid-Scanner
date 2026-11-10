@@ -40,7 +40,7 @@ Apply the migrations to that exact database UUID before publishing:
 npx cf d1 migrations apply THE_RETURNED_UUID --dir cloudflare/migrations
 ```
 
-Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it. `0003_safari_print_log.sql` only adds a table, so Safari sticker jobs appear in Print log. `0005_extensions_offline_scans.sql` adds stay extensions, an offline flag on scan records and an index on departure; it is additive, but the code that uses it needs it, so apply it before deploying.
+Run the same command again whenever a new file appears in `cloudflare/migrations`; it applies only the files not yet applied. Deploying does not apply migrations. `0002_optional_tour_id_its_safari.sql` makes tour IDs optional, adds ITS and Safari cards, and stops per-meal admission records. It rebuilds the tours, people, cards and admissions tables in one transaction, keeping every row. Export the database first (see below). Scanning keeps working before and after it, but adding tours and Safari cards needs it. `0003_safari_print_log.sql` only adds a table, so Safari sticker jobs appear in Print log. `0005_extensions_offline_scans.sql` adds an offline flag on scan records, an index on departure and a stay-extensions table (extending stays has since been removed; the table only keeps its history); it is additive, but the code that uses it needs it, so apply it before deploying.
 
 Prepare a private, git-ignored `.dev.vars` file. Use distinct random values for both entries; there is no default password:
 
@@ -63,7 +63,7 @@ Use the actual `workers.dev` URL returned by deployment. Check `/api/health`, th
 
 PDF generation runs on the printing computer to avoid the free Worker's 10 ms CPU limit. The Worker allocates cards and saves an encrypted recovery manifest; the browser generates and uploads a PDF before QZ Tray receives the print job. Print jobs contain at most 100 labels and continue in batches for larger groups. There is no lifetime lost-card replacement cap.
 
-If PDF generation or upload is interrupted, open **Print log → Finish PDF**, then **Print PDF**. This reuses the issued QR codes. An allocation retry also reuses its request key. Do not issue replacements merely because a printer was offline. Saved PDFs cannot be overwritten by an upload retry.
+If PDF generation or upload is interrupted, open **Print log → Finish PDF**, then **Print PDF**. This reuses the issued QR codes. An allocation retry also reuses its request key. Do not add the tour again merely because a printer was offline. Saved PDFs cannot be overwritten by an upload retry.
 
 Install the Zebra ZD220D driver and QZ Tray on the printing computer. Confirm the actual driver queue name in Settings and the **76.2 × 50.8 mm (3 × 2 inch)** label stock. If stickers come out blank or keep feeding, use **Settings → Stop printing**, **Calibrate labels**, then **Print test sticker**. Physical alignment, QZ permission prompts and phone-camera scanning still require an on-site test.
 

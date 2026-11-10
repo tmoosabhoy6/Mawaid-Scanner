@@ -1,6 +1,6 @@
-import { serviceAt, validateTour, validateSafari, validateExtension, bareTourId, SAME_TOUR_SQL, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
-import { SUMMARY_SQL, TOUR_REPORT_SQL, EXTENSIONS_SQL } from '../src/summary.js';
+import { SUMMARY_SQL, TOUR_REPORT_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
@@ -88,7 +88,8 @@ export async function handleRequest(request,env,clock=()=>new Date()){
  }
  if(path==='/api/tours'&&method==='POST'){
   let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
-  const existing=t.tour_id&&await first(db,SAME_TOUR_SQL,bareTourId(t.tour_id),t.arrival,t.departure,t.tour_id);if(existing)return json({...existing,existing:true});
+  // A tour added by hand is always a new tour with its own new cards; only a tour ID already used for these dates is refused.
+  const clash=t.tour_id&&await first(db,TOUR_ID_CLASH_SQL,t.tour_id,t.departure,t.arrival);if(clash)throw fail(tourIdClash(clash),409);
   const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',id,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t},201);
  }
  // Safari cards print without a QR code, so they have no people, cards or scans.
@@ -115,25 +116,6 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',key);if(existing)return json({id:existing.id,existing:true});throw error;}
   return json({id,count:ids.length},201);
  }
- // Extending a stay adds meals after departure on the same QR cards; changes keep their history.
- const extension=path.match(/^\/api\/tours\/([\w-]+)\/extensions$/);
- if(extension&&method==='GET')return json(await all(db,EXTENSIONS_SQL,extension[1]));
- if(extension&&method==='POST'){
-  const body=await boundedBody(request,1024),tour=await first(db,'SELECT id,departure,active FROM tours WHERE id=?',extension[1]);
-  let x;try{x=validateExtension(body,tour,serviceAt(clock()).date);}catch(e){throw fail(e.message,e.status);}
-  const current=await first(db,'SELECT * FROM tour_extensions WHERE tour_id=? AND date=? AND removed_at IS NULL',tour.id,x.date);
-  if(current?.meals===x.meals)return json({...current,existing:true});
-  const row={id:crypto.randomUUID(),tour_id:tour.id,date:x.date,meals:x.meals,created_at:stamp};
-  await db.batch([stmt(db,'UPDATE tour_extensions SET removed_at=? WHERE tour_id=? AND date=? AND removed_at IS NULL',stamp,tour.id,x.date),stmt(db,'INSERT INTO tour_extensions(id,tour_id,date,meals,created_at) VALUES(?,?,?,?,?)',...Object.values(row))]);
-  return json(row,201);
- }
- const removeExtension=path.match(/^\/api\/extensions\/([\w-]+)\/remove$/);
- if(removeExtension&&method==='POST'){
-  const result=await run(db,'UPDATE tour_extensions SET removed_at=? WHERE id=? AND removed_at IS NULL',stamp,removeExtension[1]);
-  if(!result.meta?.changes)throw fail('This extension was already removed.',404);return json({ok:true});
- }
- const people=path.match(/^\/api\/tours\/([\w-]+)\/people$/);
- if(people&&method==='GET')return json(await all(db,'SELECT p.id,p.person_no,c.id AS card_id,c.created_at FROM people p LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.tour_id=? ORDER BY p.person_no',people[1]));
  if(path==='/api/labels'&&method==='POST')return issueLabels(db,await boundedBody(request,100000),env,stamp);
  if(path==='/api/batches'&&method==='GET')return json(await all(db,BATCH_LIST_SQL));
  const batchPath=path.match(/^\/api\/batches\/([\w-]+)\/(pdf|manifest|status)$/);
@@ -141,7 +123,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const [,id,action]=batchPath;
   if(action==='pdf'&&method==='GET'){
    const row=await first(db,'SELECT pdf,printer_status FROM batches WHERE id=?',id);
-   if(row?.printer_status==='pdf_cleared')throw fail('This label PDF was cleared after the stay ended. Use Replace cards if a guest still needs a card.',410);
+   if(row?.printer_status==='pdf_cleared')throw fail('This label PDF was cleared after the stay ended. Add a tour to print new cards if a guest still needs one.',410);
    if(!row?.pdf)throw fail('The label PDF still needs to be generated. Use Finish PDF in Print log.',409);
    return new Response(new Uint8Array(row.pdf),{headers:{'Content-Type':'application/pdf','Content-Disposition':`inline; filename="mawaid-${id}.pdf"`,'Cache-Control':'no-store'}});
   }
@@ -180,7 +162,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const counts=await first(db,archiveSql(true).counts,before),info=await stmt(db,'SELECT 1').all();
   return json({before,today,counts,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000,cleanup:await cleanupUsage(db,clock())});
  }
- const dataset=path.match(/^\/api\/archive\/(scans|meals|tours|cards|prints|extensions)$/);
+ const dataset=path.match(/^\/api\/archive\/(scans|meals|tours|cards|prints)$/);
  if(dataset&&method==='GET'){
   const today=serviceAt(clock()).date,before=archiveCutoff(url.searchParams.get('before')||today,today),{after,limit}=archivePage(url);
   const rows=await all(db,ARCHIVE_DATASETS[dataset[1]],before,after,limit);
@@ -207,37 +189,30 @@ async function batchManifest(db,id,env){
  if(!row)throw fail('Batch not found.',404);
  return {id:row.id,remaining:row.remaining,requiresPdfUpload:!row.pdf_ready,...(row.envelope?await unseal(row.envelope,env.SYNC_TOKEN):{})};
 }
+// Cards are only issued for people a tour does not have yet. Lost or extra cards are printed by adding a new tour.
 async function issueLabels(db,body,env,stamp){
  if(!keyValid(body.requestKey))throw fail('A valid request key is required.');
  const prior=await first(db,'SELECT id FROM batches WHERE request_key=?',body.requestKey);if(prior)return json({...await batchManifest(db,prior.id,env),existing:true});
  const printer=await getSetting(db,'printer',DEFAULT_PRINTER);if(!printer.confirmed)throw fail('Confirm label dimensions in Settings.');
- const mode=body.personIds?'replacement':'initial',selected=mode==='replacement'?body.personIds:body.tourIds;
- if(!Array.isArray(selected)||!selected.length||selected.length>500||selected.some(id=>typeof id!=='string'||id.length>100))throw fail('Select valid tours or people.');
- const ids=[...new Set(selected)];if(mode==='replacement'&&ids.length>MAX_LABELS)throw fail(`Choose up to ${MAX_LABELS} replacements per print job. There is no lifetime replacement cap.`);
- const rows=mode==='replacement'?await all(db,`SELECT p.id AS person_id,p.person_no,t.id AS tour_key,t.tour_id,t.office,t.arrival,t.departure,t.pax,t.active,c.id AS previous_card FROM people p JOIN tours t ON t.id=p.tour_id LEFT JOIN cards c ON c.person_id=p.id AND c.revoked_at IS NULL WHERE p.id IN(SELECT value FROM json_each(?))`,JSON.stringify(ids)):
- await all(db,`SELECT t.id AS tour_key,t.tour_id,t.office,t.arrival,t.departure,t.pax,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.id IN(SELECT value FROM json_each(?)) ORDER BY t.arrival,t.tour_id`,JSON.stringify(ids));
- if(rows.length!==ids.length)throw fail('Tour or person not found.',404);
+ const selected=body.tourIds;
+ if(!Array.isArray(selected)||!selected.length||selected.length>500||selected.some(id=>typeof id!=='string'||id.length>100))throw fail('Select valid tours.');
+ const ids=[...new Set(selected)];
+ const rows=await all(db,`SELECT t.id AS tour_key,t.tour_id,t.office,t.arrival,t.departure,t.pax,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.id IN(SELECT value FROM json_each(?)) ORDER BY t.arrival,t.tour_id`,JSON.stringify(ids));
+ if(rows.length!==ids.length)throw fail('Tour not found.',404);
  const cards=[];let remaining=0;
  for(const r of rows){
   if(!r.active)throw fail('This source tour is no longer active.');
-  if(mode==='replacement'){
-   if(!r.previous_card||r.person_no>r.pax)throw fail('This person does not have a current entitlement.',409);
-   if(!body.expectedCardIds||body.expectedCardIds[r.person_id]!==r.previous_card)throw fail('This card changed since the replacement list was opened. Refresh it before trying again.',409);
-   cards.push({...r,id:crypto.randomUUID(),token:randomToken(),printed_at:stamp});
-  }else{
-   const missing=Math.max(0,r.pax-r.issued);remaining+=missing;
-   for(let n=r.issued+1;n<=r.pax&&cards.length<MAX_LABELS;n++)cards.push({...r,id:crypto.randomUUID(),person_id:crypto.randomUUID(),person_no:n,token:randomToken(),printed_at:stamp});
-  }
+  remaining+=Math.max(0,r.pax-r.issued);
+  for(let n=r.issued+1;n<=r.pax&&cards.length<MAX_LABELS;n++)cards.push({...r,id:crypto.randomUUID(),person_id:crypto.randomUUID(),person_no:n,token:randomToken(),printed_at:stamp});
  }
- if(!cards.length)throw fail('All selected people already have cards. Use Print log or Replace cards.');
+ if(!cards.length)throw fail('All selected people already have cards. Print them again from Print log, or add a tour for new cards.');
  remaining=Math.max(0,remaining-cards.length);
  const plan=await Promise.all(cards.map(async c=>({...c,token_hash:await hash(c.token)})));
  const id=crypto.randomUUID(),payload=JSON.stringify(plan.map(({token,...c})=>c));
  const envelope=await seal({cards,printer,count:cards.length},env.SYNC_TOKEN);
- const statements=[stmt(db,'INSERT INTO batches(id,created_at,kind,request_key,envelope,remaining) VALUES(?,?,?,?,?,?)',id,stamp,mode,body.requestKey,envelope,remaining)];
- if(mode==='initial')statements.push(stmt(db,`INSERT INTO people(id,tour_id,person_no) SELECT json_extract(value,'$.person_id'),json_extract(value,'$.tour_key'),json_extract(value,'$.person_no') FROM json_each(?)`,payload));
- else statements.push(stmt(db,`UPDATE cards SET revoked_at=? WHERE revoked_at IS NULL AND id IN(SELECT json_extract(value,'$.previous_card') FROM json_each(?))`,stamp,payload));
- statements.push(stmt(db,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.person_id'),?,json_extract(value,'$.token_hash'),? FROM json_each(?)`,id,stamp,payload));
+ const statements=[stmt(db,"INSERT INTO batches(id,created_at,kind,request_key,envelope,remaining) VALUES(?,?,'initial',?,?,?)",id,stamp,body.requestKey,envelope,remaining),
+  stmt(db,`INSERT INTO people(id,tour_id,person_no) SELECT json_extract(value,'$.person_id'),json_extract(value,'$.tour_key'),json_extract(value,'$.person_no') FROM json_each(?)`,payload),
+  stmt(db,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.person_id'),?,json_extract(value,'$.token_hash'),? FROM json_each(?)`,id,stamp,payload)];
  try{await db.batch(statements);}catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',body.requestKey);if(existing)return json({...await batchManifest(db,existing.id,env),existing:true});throw error;}
  return json({id,count:cards.length,remaining,cards,printer,requiresPdfUpload:true},201);
 }
