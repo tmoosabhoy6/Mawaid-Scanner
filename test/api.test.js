@@ -369,3 +369,24 @@ test('men’s and women’s scanners: each scan records its scanner and the scan
  await f.scanner.get('/api/logs/gates?date=2026-10-21').expect(401);
  }finally{f.close();}
 });
+
+test('daily summary splits meals by men’s and women’s scanner; By tour can show one scanner',async()=>{
+ const f=await fixture();try{
+ const a=await tour(f,3,{tour_id:'26/1'}),b=await tour(f,2,{tour_id:'26/2'});
+ const ca=(await issue(f,a.id)).cards,cb=(await issue(f,b.id)).cards;
+ const gateScan=(card,gate)=>f.scanner.post('/api/scan').send({code:`MW1:${card}`,requestKey:randomUUID(),gate});
+ f.setTime('2026-10-21T04:00:00Z');await gateScan(ca[0].token,'men');await gateScan(ca[1].token,'women');await gateScan(cb[0].token,'women');
+ f.setTime('2026-10-21T10:00:00Z');await gateScan(ca[0].token,'men');await gateScan(ca[0].token,'women');await scan(f,cb[1].token);
+ const s=(await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body;
+ assert.deepEqual([s.breakfast,s.lunch,s.scans],[3,2,5]);
+ assert.deepEqual(s.gates.men,{breakfast:1,lunch:1,dinner:0,other:0,scans:2});
+ assert.deepEqual(s.gates.women,{breakfast:2,lunch:0,dinner:0,other:0,scans:2},'a duplicate on the other scanner is not counted');
+ assert.deepEqual(s.gates.none,{breakfast:0,lunch:1,dinner:0,other:0,scans:1});
+ assert.equal((await f.admin.get('/api/summary?date=2026-10-22')).body.gates.men.scans,0);
+ const report=async gate=>(await f.admin.get('/api/summary/tours').query({date:'2026-10-21',...(gate&&{gate})}).expect(200)).body.map(t=>[t.tour_id,t.breakfast,t.lunch]);
+ assert.deepEqual(await report(),[['26/1',2,1],['26/2',1,1]]);
+ assert.deepEqual(await report('men'),[['26/1',1,1],['26/2',0,0]],'the same tours are listed for each scanner');
+ assert.deepEqual(await report('women'),[['26/1',1,0],['26/2',1,0]]);
+ assert.deepEqual(await report('nobody'),await report());
+ }finally{f.close();}
+});

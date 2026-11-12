@@ -223,21 +223,33 @@ function gateCountsHtml(c){
   const older=c.none.scans?`<p class="status-note">${number(c.none.scans)} scan${c.none.scans===1?'':'s'} on this date ${c.none.scans===1?'was':'were'} made before the scanner was split, so ${c.none.scans===1?'it has':'they have'} no scanner (${number(c.none.admitted)} admitted).</p>`:'';
   return `<div class="metric-row">${card('men','Men’s')}${card('women','Women’s')}</div><p class="status-note">Admitted counts each person once per meal; a card scanned again for breakfast is not counted twice. Breakfast also counts codes not on the card list, which are let in.</p>${older}`;
 }
+// Daily summary has three views of the same screen: everyone, the men's scanner and the women's scanner.
+// This computer remembers the last view chosen.
+const SUMMARY_VIEW_KEY='mawaidSummaryView',SUMMARY_VIEWS=[['all','All'],['men','Men’s'],['women','Women’s']];
 async function summaryView(){
-  $('#main').innerHTML=heading('Daily scan summary','Successful meal admissions for the selected Karbala date. Duplicate and declined scans are excluded.')+`<section class="panel"><form class="filters" id="summaryFilters"><label>Date<input type="date" name="date" value="${today()}"></label><button>Refresh</button></form></section><div id="summaryContent"></div><section class="panel" id="tourReport"></section>`;
+  $('#main').innerHTML=heading('Daily scan summary','Successful meal admissions for the selected Karbala date. Duplicate and declined scans are excluded.')+`<section class="panel"><form class="filters" id="summaryFilters"><label>Date<input type="date" name="date" value="${today()}"></label><button>Refresh</button></form></section><nav class="summary-tabs" role="tablist" aria-label="Summary view">${SUMMARY_VIEWS.map(([key,label])=>`<button type="button" role="tab" class="summary-tab ${key}" data-view="${key}">${label}</button>`).join('')}</nav><div id="summaryContent"></div><section class="panel" id="tourReport"></section>`;
   const meals=[['breakfast','Breakfast','Until 12:15 pm'],['lunch','Lunch','12:15 pm–6:30 pm'],['dinner','Dinner','From 6:30 pm']];
-  // Only the latest load draws the summary, so a slow earlier date cannot replace a newer one.
+  const saved=readStored(SUMMARY_VIEW_KEY,'all');let view=SUMMARY_VIEWS.some(([key])=>key===saved)?saved:'all';
+  const showView=()=>{for(const tab of $$('.summary-tab')){const on=tab.dataset.view===view;tab.classList.toggle('active',on);tab.setAttribute('aria-selected',String(on));}$('#summaryContent').dataset.view=view;};
+  $$('.summary-tab').forEach(tab=>tab.onclick=()=>{if(tab.dataset.view===view)return;view=tab.dataset.view;store(SUMMARY_VIEW_KEY,view);showView();guard(load);});
+  showView();
+  // Only the latest load draws the summary, so a slow earlier date or view cannot replace a newer one.
   let loads=0;
-  const load=async()=>{
-    const query=new URLSearchParams(new FormData($('#summaryFilters'))),n=++loads,[counts,report,currentService]=await Promise.all([api(`/summary?${query}`),api(`/summary/tours?${query}`),api('/service')]);if(n!==loads)return;
+  async function load(){
+    const query=new URLSearchParams(new FormData($('#summaryFilters'))),shown=view,tours=new URLSearchParams(query);if(shown!=='all')tours.set('gate',shown);
+    const n=++loads,[summary,report,currentService]=await Promise.all([api(`/summary?${query}`),api(`/summary/tours?${tours}`),api('/service')]);if(n!==loads)return;
+    const gates=summary.gates||{men:{},women:{},none:{}},counts=shown==='all'?summary:gates[shown],scanner=shown==='all'?'':`${GATE_LABELS[shown]} scanner`;
     const compareText=(a,b)=>String(a||'').trim().localeCompare(String(b||'').trim(),'en',{sensitivity:'base',numeric:true});
     report.sort((a,b)=>compareText(a.office,b.office)||(Number(b[currentService.meal])||0)-(Number(a[currentService.meal])||0)||compareText(a.tour_id,b.tour_id)||compareText(a.id,b.id));
-    $('#summaryContent').innerHTML=`<div class="metric-row">${[...meals,['scans','Daily scans','Successful admissions']].map(([key,label,hours])=>`<div class="metric"><span>${label}</span><strong data-count="${key}">${number(counts[key])}</strong><small>${hours}</small></div>`).join('')}</div>${counts.other?`<p class="status-note">${number(counts.other)} historical scans have no meal assigned and are included in the daily total.</p>`:''}`;
+    // In All, each card shows its men's / women's split; scans made before the scanner was split have no scanner.
+    const split=key=>shown!=='all'?'':`<ul class="gate-meals summary-split"><li class="men">Men’s <b data-split="men-${key}">${number(gates.men[key])}</b></li><li class="women">Women’s <b data-split="women-${key}">${number(gates.women[key])}</b></li>${gates.none[key]?`<li>No scanner <b data-split="none-${key}">${number(gates.none[key])}</b></li>`:''}</ul>`;
+    const older=gates.none.scans&&shown!=='all'?`<p class="status-note">${number(gates.none.scans)} meal${gates.none.scans===1?' was':'s were'} scanned on this date before the scanner was split, so ${gates.none.scans===1?'it is':'they are'} counted only under All.</p>`:'';
+    $('#summaryContent').innerHTML=`${scanner?`<h2 class="summary-view-title ${shown}">${scanner}</h2>`:''}<div class="metric-row">${[...meals,['scans','Daily scans','Successful admissions']].map(([key,label,hours])=>`<div class="metric ${shown==='all'?'':`gate-metric ${shown}`}"><span>${label}</span><strong data-count="${key}">${number(counts[key])}</strong><small>${hours}</small>${split(key)}</div>`).join('')}</div>${counts.other?`<p class="status-note">${number(counts.other)} historical scans have no meal assigned and are included in the daily total.</p>`:''}${older}`;
     // Tour-wise: meals served against PAX for every tour staying or served on this date.
     const cell=(t,key)=>`<td class="meal ${t[key]>=t.pax?'full':''}"><b>${number(t[key])}</b> <small>of ${number(t.pax)} scanned</small></td>`;
     const total=key=>report.reduce((n,t)=>n+(Number(t[key])||0),0);
-    $('#tourReport').innerHTML=`<h2>By tour</h2><p>Meals scanned for each tour against its PAX, for tours staying or served on this date. Sorted by office, then most ${e(currentService.mealLabel.toLowerCase())} scans first.</p>${report.length?`<div class="tablewrap"><table class="report"><thead><tr><th>Tour ID</th><th>Office</th><th>PAX</th>${meals.map(([,label])=>`<th>${label}</th>`).join('')}</tr></thead><tbody>${report.map(t=>`<tr><td><strong>${e(t.tour_id||'—')}</strong></td><td>${e(t.office)}</td><td>${e(t.pax)}</td>${meals.map(([key])=>cell(t,key)).join('')}</tr>`).join('')}</tbody><tfoot><tr><td colspan="2">${number(report.length)} tour${report.length===1?'':'s'}</td><td>${number(total('pax'))}</td>${meals.map(([key])=>`<td>${number(total(key))}</td>`).join('')}</tr></tfoot></table></div>`:'<div class="empty"><p>No tours were staying on this date.</p></div>'}`;
-  };
+    $('#tourReport').innerHTML=`<h2>By tour${scanner?` · ${scanner}`:''}</h2><p>Meals scanned${scanner?` on the ${e(scanner.toLowerCase())}`:''} for each tour against its PAX, for tours staying or served on this date. Sorted by office, then most ${e(currentService.mealLabel.toLowerCase())} scans first.</p>${report.length?`<div class="tablewrap"><table class="report"><thead><tr><th>Tour ID</th><th>Office</th><th>PAX</th>${meals.map(([,label])=>`<th>${label}</th>`).join('')}</tr></thead><tbody>${report.map(t=>`<tr><td><strong>${e(t.tour_id||'—')}</strong></td><td>${e(t.office)}</td><td>${e(t.pax)}</td>${meals.map(([key])=>cell(t,key)).join('')}</tr>`).join('')}</tbody><tfoot><tr><td colspan="2">${number(report.length)} tour${report.length===1?'':'s'}</td><td>${number(total('pax'))}</td>${meals.map(([key])=>`<td>${number(total(key))}</td>`).join('')}</tr></tfoot></table></div>`:'<div class="empty"><p>No tours were staying on this date.</p></div>'}`;
+  }
   liveFilters($('#summaryFilters'),load);await load();
 }
 

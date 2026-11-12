@@ -420,7 +420,10 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner, NULL for earlier scans.
  assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
- assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
+ const {gates,...totals}=counts;
+ assert.deepEqual(totals,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
+ // Scans from before the scanner split have none recorded, and the split still adds up to the total.
+ assert.deepEqual([gates.men.scans,gates.women.scans,gates.none.other,gates.none.scans],[0,0,2,2]);
  assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
  }finally{await f.close();}
 });
@@ -459,5 +462,9 @@ test('Cloudflare: scans record the men’s or women’s scanner and the scan log
  assert.deepEqual([counts.men.admitted,counts.men.declined,counts.women.admitted,counts.women.lunch,counts.none.scans],[1,1,1,1,0]);
  assert.deepEqual((await f.call('/logs?date=2026-10-21&gate=men')).data.map(r=>r.reason),['already_scanned','admitted']);
  assert.equal((await f.call('/logs/gates?date=2026-10-21',undefined,'scanner')).status,401);
+ const summary=(await f.call('/summary?date=2026-10-21')).data;
+ assert.deepEqual([summary.lunch,summary.gates.men.lunch,summary.gates.women.lunch,summary.gates.none.scans],[2,1,1,0]);
+ assert.deepEqual((await f.call('/summary/tours?date=2026-10-21&gate=women')).data.map(t=>[t.tour_id,t.lunch]),[['26/1',1]]);
+ assert.deepEqual((await f.call('/summary/tours?date=2026-10-21')).data.map(t=>[t.tour_id,t.lunch]),[['26/1',2]]);
  }finally{await f.close();}
 });

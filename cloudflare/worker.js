@@ -1,6 +1,6 @@
 import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, tourIdSql, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from '../src/scan-query.js';
-import { SUMMARY_SQL, TOUR_REPORT_SQL } from '../src/summary.js';
+import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
@@ -148,11 +148,17 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const get=k=>(url.searchParams.get(k)||'').slice(0,160),date=get('date')||serviceAt(clock()).date;
   const query=gateCountQuery({date,tour:get('tour').toLowerCase(),office:get('office').toLowerCase()});return json({date,...gateCounts(await all(db,query.sql,...query.params))});
  }
+ // Daily totals, with the men's / women's split under gates.
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
-  return json(await first(db,SUMMARY_SQL,date));
+  const [totals,gates]=await Promise.all([first(db,SUMMARY_SQL,date),all(db,GATE_SUMMARY_SQL,date)]);
+  return json(summaryWithGates(totals,gates));
  }
- if(path==='/api/summary/tours'&&method==='GET')return json(await all(db,TOUR_REPORT_SQL,url.searchParams.get('date')||serviceAt(clock()).date));
+ // ?gate=men or women limits meals served to that scanner.
+ if(path==='/api/summary/tours'&&method==='GET'){
+  const query=tourReportQuery(url.searchParams.get('date')||serviceAt(clock()).date,url.searchParams.get('gate')||'');
+  return json(await all(db,query.sql,...query.params));
+ }
  if(path==='/api/settings'&&method==='GET'){
   const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }

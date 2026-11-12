@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fixture,tour,issue,scan } from './helpers.js';
 const html=readFileSync('public/index.html','utf8'),js=readFileSync('public/app.js','utf8');
@@ -294,6 +295,32 @@ test('daily summary shows each meal and total; scanner status pauses in hidden t
  phone.eval(js);await waitFor(()=>tick);assert.equal(interval,60000);assert.equal(statusRequests,1);
  hidden=true;await tick();assert.equal(statusRequests,1);
  hidden=false;phone.document.dispatchEvent(new phone.Event('visibilitychange'));await waitFor(()=>statusRequests===2);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('daily summary has All, Men’s and Women’s views of the same screen, and remembers the view',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T10:00:00Z');
+ const gateScan=(card,gate)=>f.scanner.post('/api/scan').send({code:`MW1:${card}`,requestKey:randomUUID(),gate});
+ await gateScan(cards[0].token,'men');await gateScan(cards[1].token,'women');await gateScan(cards[2].token,'women');
+ dom=domFor(f,'/#summary');const w=dom.window,d=w.document,count=key=>d.querySelector(`[data-count=${key}]`)?.textContent;
+ const lunch=()=>d.querySelector('#tourReport tbody td.meal:nth-of-type(5) b')?.textContent;
+ await waitFor(()=>count('lunch')==='3');
+ assert.deepEqual([...d.querySelectorAll('.summary-tab')].map(b=>b.textContent),['All','Men’s','Women’s']);
+ assert.equal(d.querySelector('.summary-tab.active').dataset.view,'all');
+ assert.equal(d.querySelector('[data-split=men-lunch]').textContent,'1');assert.equal(d.querySelector('[data-split=women-lunch]').textContent,'2');
+ assert.equal(d.querySelector('[data-split=none-lunch]'),null,'no “no scanner” line when every scan has one');
+ assert.equal(lunch(),'3');
+ d.querySelector('.summary-tab.men').click();
+ await waitFor(()=>count('lunch')==='1'&&lunch()==='1');
+ assert.equal(d.querySelector('.summary-tab.men').getAttribute('aria-selected'),'true');assert.equal(d.querySelector('[data-split=men-lunch]'),null);
+ assert.match(d.querySelector('#summaryContent h2').textContent,/Men’s scanner/);assert.match(d.querySelector('#tourReport h2').textContent,/Men’s scanner/);
+ d.querySelector('.summary-tab.women').click();
+ await waitFor(()=>count('lunch')==='2'&&count('scans')==='2'&&lunch()==='2');
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidSummaryView')),'women');
+ // The view follows the date too.
+ const date=d.querySelector('#summaryFilters [name=date]');date.value='2026-10-20';date.dispatchEvent(new w.Event('change',{bubbles:true}));
+ await waitFor(()=>count('scans')==='0');assert.equal(d.querySelector('.summary-tab.active').dataset.view,'women');
  }finally{dom?.window.close();f.close();}
 });
 

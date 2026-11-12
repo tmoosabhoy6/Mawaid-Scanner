@@ -7,7 +7,7 @@ import { openDatabase, transaction } from './db.js';
 import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
-import { SUMMARY_SQL, TOUR_REPORT_SQL } from './summary.js';
+import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from './scan-query.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
@@ -189,11 +189,16 @@ export function createApp(options = {}) {
     const query = gateCountQuery({ date, tour: get('tour').toLowerCase(), office: get('office').toLowerCase() });
     res.json({ date, ...gateCounts(db.prepare(query.sql).all(...query.params)) });
   });
+  // Daily totals, with the men's / women's split under gates.
   app.get('/api/summary', auth, (req, res) => {
-    const date = req.query.date || serviceAt(now()).date;
-    res.json(db.prepare(SUMMARY_SQL).get(date));
+    const date = String(req.query.date || serviceAt(now()).date);
+    res.json(summaryWithGates(db.prepare(SUMMARY_SQL).get(date), db.prepare(GATE_SUMMARY_SQL).all(date)));
   });
-  app.get('/api/summary/tours', auth, (req, res) => res.json(db.prepare(TOUR_REPORT_SQL).all(String(req.query.date || serviceAt(now()).date))));
+  // ?gate=men or women limits meals served to that scanner.
+  app.get('/api/summary/tours', auth, (req, res) => {
+    const query = tourReportQuery(String(req.query.date || serviceAt(now()).date), String(req.query.gate || ''));
+    res.json(db.prepare(query.sql).all(...query.params));
+  });
   const databaseBytes = () => db.prepare('SELECT page_count*page_size AS n FROM pragma_page_count(),pragma_page_size()').get().n;
   app.get('/api/settings', auth, (req, res) => res.json({ printer: printer(), source: source(), sync: getSetting('sync', null), syncError: getSetting('syncError', null), timeZone: TIME_ZONE, hosting: 'server', databaseBytes: databaseBytes() }));
   const archive = archiveSql(false), cutoff = value => { const today = serviceAt(now()).date; return archiveCutoff(value || today, today); };

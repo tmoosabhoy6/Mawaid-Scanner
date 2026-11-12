@@ -204,6 +204,17 @@ tbody tr.printed-row td{background:rgba(214,64,82,.32)}tbody tr.printed-row:hove
 .report td.meal b{font-size:1.0625rem;font-variant-numeric:tabular-nums}
 .report td.meal.full b{color:var(--green-text)}
 .report tfoot td{font-weight:600;border-top:1px solid var(--line)}
+.summary-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;max-width:560px;padding:5px;margin:0 0 20px;background:var(--field);border:1px solid var(--line);border-radius:14px}
+.summary-tab{min-height:44px;border:0;border-radius:10px;background:transparent;color:var(--muted);font-size:1.0625rem;font-weight:600}
+.summary-tab:hover{background:var(--raised);color:var(--text)}
+.summary-tab.all.active{background:var(--raised);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.summary-tab.men.active{background:#1f4fb8;color:#fff}
+.summary-tab.women.active{background:var(--maroon);color:#fff}
+.summary-view-title{margin:0 0 14px;font-size:1.25rem}
+.summary-view-title.men{color:#a9c3ff}
+.summary-view-title.women{color:#f3b3c4}
+.summary-split li.men b{color:#a9c3ff}
+.summary-split li.women b{color:#f3b3c4}
 /* Scanner tabs: Men's and Women's. Each scan records the tab it was made on. */
 .gate-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:5px;margin:0 0 18px;background:var(--field);border:1px solid var(--line);border-radius:14px}
 .gate-tab{min-height:52px;border:0;border-radius:10px;background:transparent;color:var(--muted);font-size:1.125rem;font-weight:600}
