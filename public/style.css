@@ -71,6 +71,7 @@ main{padding:40px 40px 64px;max-width:1440px}
 .filters button{white-space:nowrap}
 /* A date the current search does not use: searches look across every date. */
 .filters .ignored input{opacity:.45}
+.filters label.narrow{flex:0 1 190px}
 .tablewrap{overflow:auto}
 table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap}
 th{font-size:.875rem;font-weight:500;color:var(--muted);padding:14px 16px;border-bottom:1px solid var(--line)}
@@ -201,3 +202,20 @@ tbody tr.printed-row td{background:rgba(214,64,82,.32)}tbody tr.printed-row:hove
 .report td.meal b{font-size:1.0625rem;font-variant-numeric:tabular-nums}
 .report td.meal.full b{color:var(--green-text)}
 .report tfoot td{font-weight:600;border-top:1px solid var(--line)}
+/* Scanner tabs: Men's and Women's. Each scan records the tab it was made on. */
+.gate-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:5px;margin:0 0 18px;background:var(--field);border:1px solid var(--line);border-radius:14px}
+.gate-tab{min-height:52px;border:0;border-radius:10px;background:transparent;color:var(--muted);font-size:1.125rem;font-weight:600}
+.gate-tab:hover{background:var(--raised);color:var(--text)}
+.gate-tab.men.active{background:#1f4fb8;color:#fff}
+.gate-tab.women.active{background:var(--maroon);color:#fff}
+.scanner-shell[data-gate=men] .scanner-head h1{color:#a9c3ff}
+.scanner-shell[data-gate=women] .scanner-head h1{color:#f3b3c4}
+/* Scan log: totals per scanner */
+.gate-counts .metric-row{margin-bottom:12px}
+.gate-counts>.status-note{margin:0 0 20px}
+.gate-metric.men{border-top:4px solid #4a7ff0}
+.gate-metric.women{border-top:4px solid #c2456a}
+.gate-meals{display:flex;flex-wrap:wrap;gap:6px 18px;list-style:none;margin:14px 0 0;padding:12px 0 0;border-top:1px solid var(--line-soft);color:var(--muted);font-size:.9375rem}
+.gate-meals b{color:var(--text);font-variant-numeric:tabular-nums;margin-left:4px}
+.gate-chip.men{background:#16295a;color:#a9c3ff}
+.gate-chip.women{background:#4a1626;color:#f3b3c4}

@@ -337,3 +337,26 @@ test('tours list keeps finished stays; Show and Sort by apply to tours and Safar
  assert.deepEqual(await safaris({status:'printed'}),['A']);assert.deepEqual(await safaris({status:'unprinted'}),['B','C']);
  }finally{f.close();}
 });
+
+test('men’s and women’s scanners: each scan records its scanner and the scan log counts each',async()=>{
+ const f=await fixture();try{
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:30:00Z');
+ const gateScan=(card,gate)=>f.scanner.post('/api/scan').send({code:`MW1:${card}`,requestKey:randomUUID(),gate});
+ assert.equal((await gateScan(cards[0].token,'men')).body.gate,'men');
+ assert.equal((await gateScan(cards[1].token,'women')).body.gate,'women');
+ // One admission per person per meal, whichever scanner: the same card on the other scanner is a duplicate.
+ assert.equal((await gateScan(cards[0].token,'women')).body.reason,'already_scanned');
+ assert.equal((await gateScan('unknown','women')).body.reason,'unknown_card');
+ // A phone on the older version sends no scanner; anything else is refused and not logged.
+ assert.equal((await scan(f,cards[2].token)).body.gate,null);
+ await f.scanner.post('/api/scan').send({code:'MW1:x',requestKey:randomUUID(),gate:'staff'}).expect(400);
+ const counts=(await f.admin.get('/api/logs/gates?date=2026-10-21').expect(200)).body;
+ assert.deepEqual(counts.men,{breakfast:0,lunch:1,dinner:0,admitted:1,declined:0,scans:1});
+ assert.deepEqual(counts.women,{breakfast:0,lunch:1,dinner:0,admitted:1,declined:2,scans:3});
+ assert.deepEqual(counts.none,{breakfast:0,lunch:1,dinner:0,admitted:1,declined:0,scans:1});
+ assert.equal((await f.admin.get('/api/logs/gates?date=2026-10-22')).body.women.scans,0);
+ assert.equal((await f.admin.get('/api/logs/gates?date=2026-10-21&office=nobody')).body.men.scans,0);
+ assert.deepEqual((await f.admin.get('/api/logs?date=2026-10-21&gate=women')).body.map(r=>r.gate),['women','women','women']);
+ await f.scanner.get('/api/logs/gates?date=2026-10-21').expect(401);
+ }finally{f.close();}
+});

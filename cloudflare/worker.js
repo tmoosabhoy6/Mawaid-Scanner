@@ -1,10 +1,10 @@
 import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from '../src/rules.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from '../src/scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
-import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from '../src/list-queries.js';
+import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
 export const MAX_LABELS = 100;
 const DEFAULT_PRINTER={widthMm:76.2,heightMm:50.8,name:'ZDesigner ZD220-203dpi ZPL',confirmed:true};
@@ -140,8 +140,13 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   }
  }
  if(path==='/api/logs'&&method==='GET'){
-  const get=k=>(url.searchParams.get(k)||'').slice(0,160),date=get('date'),tour=get('tour').toLowerCase(),office=get('office').toLowerCase(),status=get('status');
-  const query=scanLogQuery({date,tour,office,status});return json(await all(db,query.sql,...query.params));
+  const get=k=>(url.searchParams.get(k)||'').slice(0,160),date=get('date'),tour=get('tour').toLowerCase(),office=get('office').toLowerCase(),status=get('status'),gate=get('gate');
+  const query=scanLogQuery({date,tour,office,status,gate});return json(await all(db,query.sql,...query.params));
+ }
+ // Men's and women's scanner totals for one date, shown above the scan log.
+ if(path==='/api/logs/gates'&&method==='GET'){
+  const get=k=>(url.searchParams.get(k)||'').slice(0,160),date=get('date')||serviceAt(clock()).date;
+  const query=gateCountQuery({date,tour:get('tour').toLowerCase(),office:get('office').toLowerCase()});return json({date,...gateCounts(await all(db,query.sql,...query.params))});
  }
  if(path==='/api/summary'&&method==='GET'){
   const date=url.searchParams.get('date')||serviceAt(clock()).date;
@@ -177,9 +182,9 @@ async function scan(db,body,now){
  if(typeof body.code!=='string'||body.code.length>300)throw fail('Invalid QR code.');
  // A scan made on an offline phone is checked as at the time it was made.
  const offlineAt=offlineTime(body,now),at=offlineAt||now;
- const service=serviceAt(at),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
+ const service=serviceAt(at),gate=scanGate(body),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
- const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),codeHash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0);
+ const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),codeHash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
  const replayed=!row,earlier=REPEAT_REASONS.includes(result.reason)?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
  return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:GREEN_REASONS.includes(result.reason)&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});

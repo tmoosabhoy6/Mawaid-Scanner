@@ -6,7 +6,7 @@ export const ARCHIVE_PAGE = 1000, CLEAR_ROWS = 1000, CLEAR_PDFS = 20;
 // Clean-up stops at 40,000 so scanning and printing always keep most of the daily allowance.
 export const CLEANUP_WRITE_BUDGET = 40_000, CLEANUP_CHUNK_WRITES = 8_000;
 export const ARCHIVE_DATASETS = {
-  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason,s.offline FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
+  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason,s.offline,s.gate FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     WHERE s.date<?1 AND s.id>?2 ORDER BY s.id LIMIT ?3`,
   meals: `SELECT a.rowid AS cursor,a.date,a.meal,a.scanned_at,t.id AS tour_key,t.tour_id,t.office,p.person_no FROM admissions a JOIN people p ON p.id=a.person_id JOIN tours t ON t.id=p.tour_id
     WHERE a.date<?1 AND a.rowid>?2 ORDER BY a.rowid LIMIT ?3`,

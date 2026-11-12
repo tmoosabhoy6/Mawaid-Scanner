@@ -421,3 +421,38 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  await waitFor(()=>/Already admitted/.test(d.querySelector('#scanResult').textContent)&&!/offline/.test(d.querySelector('#scanResult').textContent));
  }finally{dom?.window.close();f.close();}
 });
+
+test('scanner tabs: Men’s and Women’s scans are recorded, kept offline, and counted in the scan log',async()=>{
+ const f=await fixture();let dom,admin;try{
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T16:22:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ const tabs=[...d.querySelectorAll('.gate-tab')];
+ assert.deepEqual(tabs.map(b=>b.textContent),['Men’s','Women’s']);
+ // A new phone starts on Men's.
+ assert.equal(d.querySelector('.gate-tab.active').dataset.gate,'men');assert.equal(d.querySelector('#scannerTitle').textContent,'Men’s scanner');
+ const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode'),send=code=>{input.value=code;submit(w,form);};
+ send(`MW1:${cards[0].token}`);await waitFor(()=>d.querySelector('#scanResult').classList.contains('green'));
+ tabs[1].click();assert.equal(d.querySelector('.gate-tab.active').dataset.gate,'women');assert.equal(tabs[1].getAttribute('aria-selected'),'true');
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScannerGate')),'women');
+ await new Promise(r=>setTimeout(r,500));send(`MW1:${cards[1].token}`);
+ await waitFor(()=>/Person 2/.test(d.querySelector('#scanResult').textContent));
+ // Offline scans keep the tab they were made on.
+ offline=true;await new Promise(r=>setTimeout(r,500));send(`MW1:${cards[2].token}`);
+ await waitFor(()=>/Checked offline/.test(d.querySelector('#scanResult').textContent));
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue'))[0].gate,'women');
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT person_no,gate,offline FROM scan_logs ORDER BY id').all().map(r=>[r.person_no,r.gate,r.offline]),[[1,'men',0],[2,'women',0],[3,'women',1]]);
+ // The admin scan log shows each scan's scanner and the totals for each.
+ admin=domFor(f,'/#logs');const a=admin.window.document;
+ await waitFor(()=>a.querySelector('[data-gate-count=women]'));
+ assert.equal(a.querySelector('[data-gate-count=men]').textContent,'1');assert.equal(a.querySelector('[data-gate-count=women]').textContent,'2');
+ assert.match(a.querySelector('.gate-metric.women').textContent,/Dinner 2/);
+ assert.equal([...a.querySelectorAll('#logTable .gate-chip')].map(c=>c.textContent).join(),'Women’s,Women’s,Men’s');
+ const gateFilter=a.querySelector('#logFilters [name=gate]');gateFilter.value='men';gateFilter.dispatchEvent(new admin.window.Event('change',{bubbles:true}));
+ await waitFor(()=>a.querySelectorAll('#logTable tbody tr').length===1);
+ }finally{dom?.window.close();admin?.window.close();f.close();}
+});

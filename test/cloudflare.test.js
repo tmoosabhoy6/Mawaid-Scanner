@@ -10,7 +10,7 @@ import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -362,7 +362,7 @@ test('Cloudflare: tours list keeps finished stays; Show and Sort by apply before
 });
 
 test('Cloudflare: large history keeps scan and summary costs bounded; tour reads grow linearly',async(t)=>{
- const {tourList,scanLogQuery}=await import('../src/list-queries.js');
+ const {tourList,scanLogQuery,gateCountQuery}=await import('../src/list-queries.js');
  const {SUMMARY_SQL}=await import('../src/summary.js');
  const {SCAN_SQL}=await import('../src/scan-query.js');
  const f=await fixture();try{
@@ -379,7 +379,7 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
  const scans=[];
  for(const [key,meal] of [['load-first','breakfast'],['load-lunch','lunch'],['load-duplicate','lunch'],['load-dinner','dinner']]) {
-   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0).all();
+   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0,'men').all();
    assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
    assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
  }
@@ -388,6 +388,9 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  const summary=await f.db.prepare(SUMMARY_SQL).bind('2026-10-21').all();
  assert.deepEqual(summary.results[0],{date:'2026-10-21',breakfast:1,lunch:1,dinner:1,other:0,scans:3});assert.ok(summary.meta.rows_read<=2);
  const logs=scanLogQuery({date:'2026-10-21'}),recent=await f.db.prepare(logs.sql).bind(...logs.params).all();assert.equal(recent.results.length,4);assert.ok(recent.meta.rows_read<40);
+ // Men's and women's totals read only the chosen date, never the 20,000 older scans.
+ const gates=gateCountQuery({date:'2026-10-21'}),byGate=await f.db.prepare(gates.sql).bind(...gates.params).all();
+ assert.deepEqual(byGate.results.map(r=>[r.gate,r.admitted,r.declined]),[['men',3,1]]);assert.ok(byGate.meta.rows_read<40,JSON.stringify(byGate.meta));
  // A date without a counter still returns zeroes. Deleting old logs updates their stored totals.
  assert.equal((await f.call('/summary?date=2026-10-19')).data.scans,0);
  await f.db.prepare("DELETE FROM scan_logs WHERE date='2026-10-21'").run();assert.equal((await f.call('/summary?date=2026-10-21')).data.scans,0);
@@ -413,8 +416,8 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  await f.db.prepare(`INSERT INTO scan_logs(request_key,date,meal,reason,scanned_at) VALUES('legacy1','2026-10-20',NULL,'admitted','x'),('legacy2','2026-10-20',NULL,'admitted','x'),('declined','2026-10-20',NULL,'unknown_card','x')`).run();
  const before=(await f.db.prepare('SELECT * FROM scan_logs').all()).results;
  for(const file of MIGRATIONS.slice(3))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
- // 0005 only adds the offline flag, which is 0 for every earlier scan.
- assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0})));
+ // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner, NULL for earlier scans.
+ assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
  assert.deepEqual(counts,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
  assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
@@ -441,5 +444,19 @@ test('Cloudflare: stays end on departure, offline scans, the phone card list and
  assert.deepEqual(report.map(r=>[r.tour_id,r.breakfast,r.lunch,r.dinner]),[['26/1',0,2,0]]);
  assert.equal((await f.call('/summary?date=2026-10-24')).data.lunch,2);
  assert.equal((await f.call('/archive/extensions?before=2026-10-25')).status,404);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: scans record the men’s or women’s scanner and the scan log counts each',async()=>{
+ const f=await fixture();try{
+ const t=await f.tour(2),b=await f.issue(t.id);f.setTime('2026-10-21T09:30:00Z');
+ const scan=(token,gate)=>f.call('/scan',{code:'MW1:'+token,requestKey:randomUUID(),gate},'scanner');
+ assert.equal((await scan(b.cards[0].token,'men')).data.gate,'men');assert.equal((await scan(b.cards[1].token,'women')).data.gate,'women');
+ assert.equal((await scan(b.cards[1].token,'men')).data.reason,'already_scanned');
+ assert.equal((await scan('x','women-gate')).status,400);
+ const counts=(await f.call('/logs/gates?date=2026-10-21')).data;
+ assert.deepEqual([counts.men.admitted,counts.men.declined,counts.women.admitted,counts.women.lunch,counts.none.scans],[1,1,1,1,0]);
+ assert.deepEqual((await f.call('/logs?date=2026-10-21&gate=men')).data.map(r=>r.reason),['already_scanned','admitted']);
+ assert.equal((await f.call('/logs/gates?date=2026-10-21',undefined,'scanner')).status,401);
  }finally{await f.close();}
 });

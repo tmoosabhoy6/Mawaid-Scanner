@@ -6,9 +6,9 @@ import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
 import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
-import { tourList, safariList, scanLogQuery, BATCH_LIST_SQL } from './list-queries.js';
+import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL } from './summary.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime } from './scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from './scan-query.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
@@ -166,10 +166,10 @@ export function createApp(options = {}) {
     if (typeof requestKey !== 'string' || !/^[\w-]{16,100}$/.test(requestKey)) throw fail('A scan request key is required.');
     if (typeof code !== 'string' || code.length > 300) throw fail('Invalid QR code.');
     // A scan made on an offline phone is checked as at the time it was made.
-    const offlineAt = offlineTime(req.body, now()), at = offlineAt || now(), service = serviceAt(at);
+    const offlineAt = offlineTime(req.body, now()), at = offlineAt || now(), service = serviceAt(at), gate = scanGate(req.body);
     const codeHash = code.startsWith('MW1:') ? hash(code.slice(4)) : '';
     const result = transaction(db, () => {
-      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), codeHash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0);
+      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), codeHash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate);
       return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
     const earlier = REPEAT_REASONS.includes(result.reason) ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;
@@ -177,9 +177,15 @@ export function createApp(options = {}) {
     res.json({ ...result, replayed: !!result.replayed, firstScannedAt: earlier?.scanned_at || null, status: GREEN_REASONS.includes(result.reason) && !result.replayed ? 'green' : 'red', message: result.replayed ? 'Request already processed — check the scan log before admitting' : reasons[result.reason], serverTime: now().toISOString() });
   });
   app.get('/api/logs', auth, (req, res) => {
-    const { date = '', tour = '', status = '', office = '' } = req.query;
-    const query = scanLogQuery({ date, tour: tour.toLowerCase(), office: office.toLowerCase(), status });
+    const { date = '', tour = '', status = '', office = '', gate = '' } = req.query;
+    const query = scanLogQuery({ date, tour: tour.toLowerCase(), office: office.toLowerCase(), status, gate });
     res.json(db.prepare(query.sql).all(...query.params));
+  });
+  // Men's and women's scanner totals for one date, shown above the scan log.
+  app.get('/api/logs/gates', auth, (req, res) => {
+    const get = k => String(req.query[k] || '').slice(0, 160), date = get('date') || serviceAt(now()).date;
+    const query = gateCountQuery({ date, tour: get('tour').toLowerCase(), office: get('office').toLowerCase() });
+    res.json({ date, ...gateCounts(db.prepare(query.sql).all(...query.params)) });
   });
   app.get('/api/summary', auth, (req, res) => {
     const date = req.query.date || serviceAt(now()).date;
