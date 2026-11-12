@@ -195,7 +195,7 @@ test('Cloudflare: a tour the Sheet still lists but leaves out keeps its printed 
 test('Cloudflare: stay dates, roles and CSRF block admission; every hour belongs to a meal',async()=>{
  const f=await fixture();try{
  const t=await f.tour(1),b=await f.issue(t.id);
- for(const [time,reason]of [['2026-10-20T09:30:00Z','before_arrival'],['2026-10-21T09:00:00Z','admitted'],['2026-10-21T15:00:00Z','already_scanned'],['2026-10-21T16:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T09:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
+ for(const [time,reason]of [['2026-10-20T09:30:00Z','before_arrival'],['2026-10-21T10:00:00Z','admitted'],['2026-10-21T15:00:00Z','already_scanned'],['2026-10-21T16:00:00Z','admitted'],['2026-10-24T20:59:00Z','admitted'],['2026-10-25T10:00:00Z','after_departure']]){f.setTime(time);assert.equal((await f.scan(b.cards[0].token)).data.reason,reason);}
  assert.equal((await f.call('/tours',undefined,'scanner')).status,401);
  assert.equal((await f.call('/scan',{code:'MW1:x',requestKey:randomUUID()},'scanner',{headers:{Origin:'https://other.test'}})).status,403);
  assert.equal((await f.scan('unknown')).data.reason,'unknown_card');
@@ -434,9 +434,9 @@ test('Cloudflare: stays end on departure, offline scans, the phone card list and
  assert.equal(full.extensions,undefined);
  // Extending a stay is no longer offered.
  assert.equal((await f.call(`/tours/${t.id}/extensions`,{date:'2026-10-25',meals:'lunch'})).status,404);
- f.setTime('2026-10-24T09:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
+ f.setTime('2026-10-24T10:00:00Z');const green=await f.scan(one.token);assert.equal(green.data.status,'green');
  const dup=await f.scan(one.token);assert.equal(dup.data.reason,'already_scanned');assert.equal(dup.data.firstScannedAt,green.data.scanned_at);
- f.setTime('2026-10-25T09:00:00Z');const ended=await f.scan(one.token);assert.deepEqual([ended.data.reason,ended.data.message],['after_departure','Stay has ended']);
+ f.setTime('2026-10-25T10:00:00Z');const ended=await f.scan(one.token);assert.deepEqual([ended.data.reason,ended.data.message],['after_departure','Stay has ended']);
  // An offline phone's lunch scan from yesterday is counted for yesterday.
  const offline=await f.call('/scan',{code:'MW1:'+two.token,requestKey:randomUUID(),offlineAt:'2026-10-24T09:30:00Z',offlineStatus:'green'},'scanner');
  assert.deepEqual([offline.data.reason,offline.data.date,offline.data.meal,offline.data.offline],['admitted','2026-10-24','lunch',1]);

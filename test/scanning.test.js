@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { fixture,tour,issue,scan,replaceCard } from './helpers.js';
 
-// Karbala is UTC+3: 04:00Z is breakfast, 09:00Z lunch, 16:30Z dinner, 02:30Z half an hour before breakfast.
+// Karbala is UTC+3: 04:00Z is breakfast, 10:00Z lunch, 16:30Z dinner, 02:30Z half an hour before breakfast.
 test('a stay ends on its departure day; extending a stay is no longer offered',async()=>{
  const f=await fixture();try{
  const t=await tour(f,2),{cards}=await issue(f,t.id);
  f.setTime('2026-10-23T16:30:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green','departure day is included');
- f.setTime('2026-10-24T09:00:00Z');
+ f.setTime('2026-10-24T10:00:00Z');
  const ended=await scan(f,cards[0].token);assert.deepEqual([ended.body.reason,ended.body.status,ended.body.message],['after_departure','red','Stay has ended']);
  await f.admin.post(`/api/tours/${t.id}/extensions`).send({date:'2026-10-24',meals:'lunch'}).expect(404);
  await f.admin.get(`/api/tours/${t.id}/extensions`).expect(404);
@@ -32,7 +32,7 @@ test('duplicate scans report when the meal was first served',async()=>{
 
 test('offline scans are checked at the time they were made; a phone that showed red records no meal',async()=>{
  const f=await fixture();try{
- const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T09:00:00Z');
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T10:00:00Z');
  const sync=(token,offlineAt,offlineStatus='green',requestKey=randomUUID())=>f.scanner.post('/api/scan').send({code:`MW1:${token}`,requestKey,offlineAt,offlineStatus});
  const key=randomUUID(),sent=await sync(cards[0].token,'2026-10-21T04:10:00Z','green',key);
  assert.deepEqual([sent.body.reason,sent.body.meal,sent.body.offline,sent.body.scanned_at],['admitted','breakfast',1,'2026-10-21T04:10:00.000Z']);
@@ -73,7 +73,7 @@ test('gate phones download current cards once, then only what changed',async()=>
 test('tour report shows each meal against PAX',async()=>{
  const f=await fixture();try{
  const t=await tour(f,3),{cards}=await issue(f,t.id);
- await scan(f,cards[0].token);await scan(f,cards[1].token);f.setTime('2026-10-21T09:00:00Z');await scan(f,cards[2].token);
+ await scan(f,cards[0].token);await scan(f,cards[1].token);f.setTime('2026-10-21T10:00:00Z');await scan(f,cards[2].token);
  const report=(await f.admin.get('/api/summary/tours?date=2026-10-21').expect(200)).body;
  assert.deepEqual(report.map(r=>[r.tour_id,r.pax,r.breakfast,r.lunch,r.dinner]),[['26/3205',3,2,1,0]]);
  }finally{f.close();}

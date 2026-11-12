@@ -279,7 +279,7 @@ test('filters apply as they change, and a tour ID search looks across every date
 test('daily summary shows each meal and total; scanner status pauses in hidden tabs',async()=>{
  const f=await fixture();let dom;try{
  const t=await tour(f,1),{cards}=await issue(f,t.id);
- for(const time of ['2026-10-21T04:00:00Z','2026-10-21T09:00:00Z','2026-10-21T16:30:00Z']){f.setTime(time);await scan(f,cards[0].token);}
+ for(const time of ['2026-10-21T04:00:00Z','2026-10-21T10:00:00Z','2026-10-21T16:30:00Z']){f.setTime(time);await scan(f,cards[0].token);}
  dom=domFor(f,'/#summary');const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('[data-count=dinner]'));
  for(const meal of ['breakfast','lunch','dinner'])assert.equal(d.querySelector(`[data-count=${meal}]`).textContent,'1');
@@ -299,7 +299,7 @@ test('daily summary shows each meal and total; scanner status pauses in hidden t
 
 test('By tour groups offices, then sorts most scans first for the current Karbala meal on each refresh',async()=>{
  const f=await fixture();let dom;try{
- const clocks=['2026-10-21T04:00:00Z','2026-10-21T09:00:00Z','2026-10-21T16:22:00Z'];
+ const clocks=['2026-10-21T04:00:00Z','2026-10-21T10:00:00Z','2026-10-21T16:22:00Z'];
  // Tour IDs deliberately conflict with meal counts, and Zulu must stay below Alpha even with more scans.
  for(const [tour_id,office,counts] of [['26/10','Alpha',[0,3,1]],['26/2','Alpha',[3,0,2]],['26/3','Alpha',[1,1,0]],['26/11','Alpha',[0,0,0]],['26/1','Zulu',[3,3,3]]]){
   const t=await tour(f,3,{tour_id,office}),{cards}=await issue(f,t.id);
