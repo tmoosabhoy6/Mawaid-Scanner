@@ -4,7 +4,7 @@ import { rateLimit } from 'express-rate-limit';
 import { randomBytes, randomUUID, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { openDatabase, transaction } from './db.js';
-import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from './rules.js';
+import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, TIME_ZONE, START_DATE } from './rules.js';
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL } from './summary.js';
@@ -77,12 +77,13 @@ export function createApp(options = {}) {
     res.json(rows);
   });
   app.post('/api/tours', auth, (req, res) => {
-    let t; try { t = validateTour(req.body, { requireId: false }); } catch (e) { throw fail(e.message); }
-    // A tour added by hand is always a new tour with its own new cards; only a tour ID already used for these dates is refused.
-    const clash = t.tour_id && db.prepare(TOUR_ID_CLASH_SQL).get(t.tour_id, t.departure, t.arrival);
-    if (clash) throw fail(tourIdClash(clash), 409);
-    const id = uid(); db.prepare('INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id, t.tour_id, t.its, t.office, t.arrival, t.departure, t.pax, now().toISOString());
-    res.status(201).json({ id, ...t });
+    let t; try { t = validateTour(req.body, { manual: true }); } catch (e) { throw fail(e.message); }
+    // A tour added by hand is always a new tour with its own new cards. An ID already in the app is shared (see rules.js).
+    const existing = db.prepare(EXISTING_TOUR_SQL).get(t.tour_id);
+    if (!t.office && !existing) throw fail(MISSING_OFFICE);
+    if (!t.office) t.office = existing.office;
+    const id = uid(); db.prepare('INSERT INTO tours(id,tour_id,shared_tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(id, existing ? null : t.tour_id, existing ? t.tour_id : null, t.its, t.office, t.arrival, t.departure, t.pax, now().toISOString());
+    res.status(201).json({ id, ...t, shared: !!existing });
   });
   // Safari cards print without a QR code, so they have no people, cards or scans.
   app.get('/api/safaris', auth, (req, res) => {
@@ -125,6 +126,7 @@ export function createApp(options = {}) {
     const batchId = uid(), stamp = now().toISOString(); const cards = [];
     for (const id of ids) {
       const tour = db.prepare('SELECT * FROM tours WHERE id=?').get(id); if (!tour) throw fail('Tour not found.', 404);
+      tour.tour_id ??= tour.shared_tour_id;
       if (!tour.active) throw fail('This source tour is no longer active.');
       const count = db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n;
       for (let n = count + 1; n <= tour.pax && cards.length < 500; n++) cards.push({ ...tour, id: uid(), tour_key: id, person_id: uid(), person_no: n, token: token(), printed_at: stamp });

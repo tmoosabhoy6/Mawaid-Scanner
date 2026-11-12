@@ -76,7 +76,9 @@ test('the tour ID is enlarged within the label and no text leaves the frame or o
    if(tour_id==='26/1234')assert.ok(value.size>caption.size*1.25,`${where}: the tour ID is enlarged`);
    assert.ok(Math.abs(value.base-caption.base)<1e-6,`${where}: tour ID shares the caption's baseline`);
    // Each detail line clears the next one, and the tour ID clears the society name above it.
-   const lines=['FAIZ-E-HUSAINI','Tour','Office','PAX','Arrival','Departure'].map(start=>start==='Tour'?value:text.find(i=>i.str.startsWith(start)));
+   // The person's number is not printed.
+   assert.ok(!text.some(i=>/PAX/.test(i.str)),`${where}: the person number is gone`);
+   const lines=['FAIZ-E-HUSAINI','Tour','Office','Arrival','Departure'].map(start=>start==='Tour'?value:text.find(i=>i.str.startsWith(start)));
    for(let n=1;n<lines.length;n++){const above=lines[n-1],below=lines[n];assert.ok(above.base-above.size*DESC>below.base+below.size*ASC,`${where}: "${above.str}" overlaps "${below.str}"`);}
   }finally{await pdf.destroy();}
  }

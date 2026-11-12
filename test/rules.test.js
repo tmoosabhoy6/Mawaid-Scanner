@@ -26,11 +26,15 @@ test('reject impossible dates, reverse ranges, fractional/negative/excessive PAX
  const input={tour_id:'26/1',office:'Test',arrival:day,departure:day,pax:50};assert.equal(validateTour(input).pax,50);
  for(const patch of [{arrival:'2026-02-30'},{departure:'2026-10-20'},{pax:0},{pax:1.5},{pax:10001},{office:''},{tour_id:''},{its:'1'.repeat(41)}])assert.throws(()=>validateTour({...input,...patch}));
 });
-test('tour ID and ITS are optional for tours added by hand; the sheet sync still needs a tour ID',()=>{
+test('tours added by hand need the full tour ID; the office may be left for the server to fill in; ITS is optional',()=>{
  const input={office:'Test',arrival:day,departure:day,pax:5};
- assert.throws(()=>validateTour(input));
- assert.deepEqual(validateTour({...input,tour_id:'  ',its:''},{requireId:false}),{tour_id:null,its:null,office:'Test',arrival:day,departure:day,pax:5});
- assert.equal(validateTour({...input,its:' 30412345 '},{requireId:false}).its,'30412345');
+ assert.throws(()=>validateTour(input),/Enter a tour ID/);
+ for(const tour_id of ['','  ','5253','2026/5253','26/','26/5253a','a26/5253','26/1234567'])assert.throws(()=>validateTour({...input,tour_id},{manual:true}),String(tour_id));
+ assert.deepEqual(validateTour({...input,tour_id:' 26 / 5253 ',its:''},{manual:true}),{tour_id:'26/5253',its:null,office:'Test',arrival:day,departure:day,pax:5});
+ assert.equal(validateTour({...input,tour_id:'26/5253',office:''},{manual:true}).office,'');
+ assert.equal(validateTour({...input,tour_id:'26/5253',its:' 30412345 '},{manual:true}).its,'30412345');
+ // The Sheet sync keeps its own IDs as they are, and still needs an office.
+ assert.equal(validateTour({...input,tour_id:'2849'}).tour_id,'2849');assert.throws(()=>validateTour({...input,tour_id:'26/1',office:''}));
 });
 test('Safari: every field is optional; filled fields are still validated',()=>{
  assert.deepEqual(validateSafari({}),{office:null,tour_id:null,its:null,arrival:null,departure:null,pax:null});

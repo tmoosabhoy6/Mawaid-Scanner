@@ -1,16 +1,19 @@
 import { listOrder, tourStatus, safariStatus } from './tour-list.js';
 import { GREEN_REASONS, GATES } from './scan-query.js';
+import { tourIdSql } from './rules.js';
+const TOUR_ID = tourIdSql('t.');
 const green = `s.reason IN (${GREEN_REASONS.map(r => `'${r}'`).join(',')})`;
 // Optional date filters must stay indexable: WHERE arrival=? rather than (?='' OR arrival=?).
 export function tourList({ arrival = '', q = '', sort = '', status = '' } = {}) {
   const params = [], where = ['t.active=1', tourStatus(status)];
   if (arrival) { where.push('t.arrival=?'); params.push(arrival); }
-  if (q) { where.push('(instr(lower(t.tour_id),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0)'); params.push(q,q,q); }
+  if (q) { where.push(`(instr(lower(${TOUR_ID}),?)>0 OR instr(lower(t.office),?)>0 OR instr(lower(t.its),?)>0)`); params.push(q,q,q); }
   return { sql: `SELECT x.*,(SELECT printer_status FROM batches WHERE id=x.batch_id) AS batch_status FROM
-    (SELECT t.*,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
+    (SELECT t.id,${TOUR_ID} AS tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.source,t.source_key,t.created_at,t.active,
+      (SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued,
       (SELECT b.id FROM people p CROSS JOIN cards c ON c.person_id=p.id JOIN batches b ON b.id=c.batch_id
         WHERE p.tour_id=t.id ORDER BY b.created_at DESC,b.rowid DESC LIMIT 1) AS batch_id
-      FROM tours t WHERE ${where.join(' AND ')} ORDER BY ${listOrder(sort,'t.')} LIMIT 1000) x
+      FROM tours t WHERE ${where.join(' AND ')} ORDER BY ${listOrder(sort,'t.',TOUR_ID)} LIMIT 1000) x
     ORDER BY ${listOrder(sort,'x.')}`, params };
 }
 export function safariList({ arrival = '', q = '', sort = '', status = '' } = {}) {
@@ -26,12 +29,12 @@ export function safariList({ arrival = '', q = '', sort = '', status = '' } = {}
 export function scanLogQuery({ date = '', tour = '', office = '', status = '', gate = '' } = {}) {
   const params = [], where = [];
   if (date) { where.push('s.date=?'); params.push(date); }
-  if (tour) { where.push('instr(lower(t.tour_id),?)>0'); params.push(tour); }
+  if (tour) { where.push(`instr(lower(${TOUR_ID}),?)>0`); params.push(tour); }
   if (office) { where.push('instr(lower(t.office),?)>0'); params.push(office); }
   if (status === 'green') where.push(green);
   if (status === 'red') where.push(`NOT ${green}`);
   if (GATES.includes(gate)) { where.push('s.gate=?'); params.push(gate); }
-  return { sql: `SELECT s.*,t.tour_id AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
+  return { sql: `SELECT s.*,${TOUR_ID} AS display_tour,t.office FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     ${where.length ? 'WHERE '+where.join(' AND ') : ''} ORDER BY s.id DESC LIMIT 1000`, params };
 }
 // Scan log totals for one date, per scanner (Men's, Women's, or none recorded for older scans).
@@ -41,7 +44,7 @@ export function scanLogQuery({ date = '', tour = '', office = '', status = '', g
 const counted = "s.reason IN ('admitted','breakfast_unlisted')";
 export function gateCountQuery({ date = '', tour = '', office = '' } = {}) {
   const params = [date], where = ['s.date=?'];
-  if (tour) { where.push('instr(lower(t.tour_id),?)>0'); params.push(tour); }
+  if (tour) { where.push(`instr(lower(${TOUR_ID}),?)>0`); params.push(tour); }
   if (office) { where.push('instr(lower(t.office),?)>0'); params.push(office); }
   return { sql: `SELECT COALESCE(s.gate,'') AS gate,
     COALESCE(SUM(${counted} AND s.meal='breakfast'),0) AS breakfast,COALESCE(SUM(${counted} AND s.meal='lunch'),0) AS lunch,

@@ -1,4 +1,4 @@
-import { serviceAt, validateTour, validateSafari, TOUR_ID_CLASH_SQL, tourIdClash, TIME_ZONE, START_DATE } from '../src/rules.js';
+import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, tourIdSql, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from '../src/scan-query.js';
 import { SUMMARY_SQL, TOUR_REPORT_SQL } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
@@ -87,10 +87,10 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   const query=tourList({arrival,q,sort,status});return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/tours'&&method==='POST'){
-  let t;try{t=validateTour(await boundedBody(request,8192),{requireId:false});}catch(e){throw fail(e.message);}
-  // A tour added by hand is always a new tour with its own new cards; only a tour ID already used for these dates is refused.
-  const clash=t.tour_id&&await first(db,TOUR_ID_CLASH_SQL,t.tour_id,t.departure,t.arrival);if(clash)throw fail(tourIdClash(clash),409);
-  const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?)',id,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t},201);
+  let t;try{t=validateTour(await boundedBody(request,8192),{manual:true});}catch(e){throw fail(e.message);}
+  // A tour added by hand is always a new tour with its own new cards. An ID already in the app is shared (see rules.js).
+  const existing=await first(db,EXISTING_TOUR_SQL,t.tour_id);if(!t.office&&!existing)throw fail(MISSING_OFFICE);if(!t.office)t.office=existing.office;
+  const id=crypto.randomUUID();await run(db,'INSERT INTO tours(id,tour_id,shared_tour_id,its,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?,?,?)',id,existing?null:t.tour_id,existing?t.tour_id:null,t.its,t.office,t.arrival,t.departure,t.pax,stamp);return json({id,...t,shared:!!existing},201);
  }
  // Safari cards print without a QR code, so they have no people, cards or scans.
  if(path==='/api/safaris'&&method==='GET'){
@@ -202,7 +202,7 @@ async function issueLabels(db,body,env,stamp){
  const selected=body.tourIds;
  if(!Array.isArray(selected)||!selected.length||selected.length>500||selected.some(id=>typeof id!=='string'||id.length>100))throw fail('Select valid tours.');
  const ids=[...new Set(selected)];
- const rows=await all(db,`SELECT t.id AS tour_key,t.tour_id,t.office,t.arrival,t.departure,t.pax,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.id IN(SELECT value FROM json_each(?)) ORDER BY t.arrival,t.tour_id`,JSON.stringify(ids));
+ const rows=await all(db,`SELECT t.id AS tour_key,${tourIdSql('t.')} AS tour_id,t.office,t.arrival,t.departure,t.pax,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.id IN(SELECT value FROM json_each(?)) ORDER BY t.arrival,tour_id`,JSON.stringify(ids));
  if(rows.length!==ids.length)throw fail('Tour not found.',404);
  const cards=[];let remaining=0;
  for(const r of rows){

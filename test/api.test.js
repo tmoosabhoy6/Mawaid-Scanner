@@ -36,7 +36,7 @@ test('cards are never replaced: a new tour gives guests new cards and their firs
  await f.admin.get(`/api/tours/${t.id}/people`).expect(404);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM cards WHERE revoked_at IS NOT NULL').get().n,0);
  // Adding the guests as a new tour prints new cards; the old cards still work.
- const extra=(await f.admin.post('/api/tours').send({office:'FH Kuwait',pax:2,arrival:'2026-10-21',departure:'2026-10-23'}).expect(201)).body;
+ const extra=(await f.admin.post('/api/tours').send({tour_id:'26/3205',pax:2,arrival:'2026-10-21',departure:'2026-10-23'}).expect(201)).body;assert.equal(extra.office,'FH Kuwait');
  const fresh=(await issue(f,extra.id)).cards;assert.equal(fresh.length,2);
  for(const c of fresh)assert.equal((await scan(f,c.token)).body.status,'green');
  assert.equal((await scan(f,cards[1].token)).body.status,'green');
@@ -118,7 +118,7 @@ test('roles, CSRF, login, validation, duplicate stays and printing setup',async(
  await f.admin.post('/api/tours').set('Origin','https://other.example').send({}).expect(403);
  await request(f.app).post('/api/login').send({role:'admin',password:'wrong'}).expect(401);
  await f.admin.post('/api/tours').send({tour_id:'x'}).expect(400);
- const t=await tour(f,2);const duplicate=await f.admin.post('/api/tours').send({...t,pax:5}).expect(409);assert.match(duplicate.body.error,/already used for 2026-10-21 to 2026-10-23.*Leave the tour ID blank/);
+ const t=await tour(f,2);const duplicate=await f.admin.post('/api/tours').send({...t,pax:5}).expect(201);assert.equal(duplicate.body.shared,true);assert.equal(duplicate.body.tour_id,'26/3205');assert.notEqual(duplicate.body.id,t.id);
  const other=await tour(f,1,{arrival:'2026-11-01',departure:'2026-11-02'});assert.notEqual(other.id,t.id);
  await f.admin.post('/api/labels').send({requestKey:randomUUID()}).expect(400);
  const defaults=await f.admin.get('/api/settings').expect(200);assert.equal(defaults.body.printer.widthMm,76.2);assert.equal(defaults.body.printer.heightMm,50.8);
@@ -154,7 +154,9 @@ test('sync is authenticated, idempotent, tab-specific; printed cards outlast a l
 
 test('source updates an existing manual stay without adding capacity; SQL-like strings are inert',async()=>{
  const f=await fixture();try{
- const t=await tour(f,1,{tour_id:"26/' OR 1=1 --",office:'<script>evil()</script>'});await issue(f,t.id);
+ // Tour IDs added by hand are now checked; this one is stored as an older tour could have been.
+ const t={id:'legacy',tour_id:"26/' OR 1=1 --",office:'<script>evil()</script>',arrival:'2026-10-21',departure:'2026-10-23',pax:1};
+ f.db.prepare('INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES(?,?,?,?,?,?,?)').run(t.id,t.tour_id,t.office,t.arrival,t.departure,t.pax,'x');await issue(f,t.id);
  await request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours:[{...t,departure:'2026-10-24',office:'Updated source office'}]}).expect(200);
  const rows=await f.admin.get('/api/tours').query({q:"' OR 1=1"}).expect(200);assert.equal(rows.body.length,1);
  assert.equal(rows.body[0].id,t.id);assert.equal(rows.body[0].departure,'2026-10-24');assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM people').get().n,1);
@@ -190,7 +192,8 @@ test('sync moves a corrected arrival with its cards, takes over a hand-typed sta
  const moved={tour_id:'26/2728',office:'FH France',arrival:'2026-10-21',departure:'2026-10-24',pax:2};
  await sync([moved]).expect(200);
  const stay=(await f.admin.get('/api/tours')).body[0],{cards}=await issue(f,stay.id);
- const manual=await tour(f,1,{tour_id:'2846',arrival:'2026-10-22',departure:'2026-10-23'});await issue(f,manual.id);
+ // Typed by hand without the 26/ prefix, before Add tour required the full tour ID.
+ const manual={id:'manual'};f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('manual','2846','FH Kuwait','2026-10-22','2026-10-23',1,'x')").run();await issue(f,manual.id);
  await sync([moved],'Other').expect(409);assert.match((await f.admin.get('/api/settings')).body.syncError.message,/does not match/);
  f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES('old','26/3400','A','2026-10-20','2026-10-23',1,'sheets','old-key','x',0),('older','26/3400','A','2026-10-24','2026-10-26',1,'sheets','older-key','x',0)").run();
  await sync([{...moved,arrival:'2026-10-22'},{tour_id:'26/2846',office:'FH Kuwait',arrival:'2026-10-22',departure:'2026-10-24',pax:1},
@@ -279,25 +282,31 @@ test('archive export pages records; clearing never touches today, active stays o
  }finally{f.close();}
 });
 
-test('tour ID and ITS are optional; tours without an ID never merge and still print QR cards',async()=>{
+test('add tour needs the full tour ID; an ID already in the app adds new cards under it, untouched by the Sheet',async()=>{
  const f=await fixture();try{
  const base={office:'Walk-in group',arrival:'2026-10-21',departure:'2026-10-23',pax:1};
- const a=await f.admin.post('/api/tours').send({...base,tour_id:'',its:'30412345'}).expect(201),b=await f.admin.post('/api/tours').send(base).expect(201);
- assert.notEqual(a.body.id,b.body.id);assert.equal(a.body.tour_id,null);assert.equal(a.body.its,'30412345');assert.equal(b.body.existing,undefined);
- const found=(await f.admin.get('/api/tours').query({q:'304123'}).expect(200)).body;assert.equal(found.length,1);assert.equal(found[0].its,'30412345');
- const {cards}=await issue(f,a.body.id);assert.equal(cards[0].tour_id,null);assert.equal((await scan(f,cards[0].token)).body.status,'green');
- const logs=(await f.admin.get('/api/logs').expect(200)).body;assert.equal(logs[0].display_tour,null);
- assert.equal((await f.admin.get('/api/summary?date=2026-10-21').expect(200)).body.scans,1);
- // A tour ID already used for overlapping dates is refused with a clear reason; nothing is merged.
- const named=await tour(f,1);
- assert.match((await f.admin.post('/api/tours').send({...named,its:'1'}).expect(409)).body.error,/Tour ID 26\/3205 is already used/);
- assert.equal((await f.admin.post('/api/tours').send({...named,arrival:'2026-10-23',departure:'2026-10-25'}).expect(409)).status,409);
- // Every tour added by hand is a new tour with its own cards, even with the Sheet's ID typed without 26/.
- const sheet=(await f.admin.post('/api/tours').send({...base,tour_id:'26/2849',arrival:'2026-10-21',departure:'2026-10-24',pax:3}).expect(201)).body;
- const again=(await f.admin.post('/api/tours').send({...base,tour_id:'2849',arrival:'2026-10-24',departure:'2026-10-24',pax:2}).expect(201)).body;
- assert.notEqual(again.id,sheet.id);assert.equal(again.pax,2);assert.equal(again.existing,undefined);
- assert.equal((await issue(f,again.id)).cards.length,2);
- await f.admin.post('/api/tours').send({...base,tour_id:'26/3205',arrival:'2026-10-26',departure:'2026-10-27'}).expect(201);
+ assert.match((await f.admin.post('/api/tours').send(base).expect(400)).body.error,/Enter the tour ID, such as 26\/5253/);
+ for(const tour_id of ['3205','2026/3205','26/','26-3205','26/32a'])assert.match((await f.admin.post('/api/tours').send({...base,tour_id}).expect(400)).body.error,/full tour ID with its year/);
+ // A new tour ID needs its office.
+ assert.match((await f.admin.post('/api/tours').send({...base,tour_id:'26/5253',office:''}).expect(400)).body.error,/office name/);
+ const named=await tour(f,1,{its:'30412345'}),first=(await issue(f,named.id)).cards;assert.equal(named.shared,false);assert.equal(named.its,'30412345');
+ // The same ID again, even for overlapping dates and the same arrival: only PAX and dates are needed.
+ const extra=(await f.admin.post('/api/tours').send({tour_id:' 26 / 3205 ',arrival:'2026-10-22',departure:'2026-10-25',pax:2}).expect(201)).body;
+ const same=(await f.admin.post('/api/tours').send({tour_id:'26/3205',arrival:'2026-10-21',departure:'2026-10-23',pax:1,office:'Own office'}).expect(201)).body;
+ assert.deepEqual([extra.tour_id,extra.office,extra.shared,same.office],['26/3205','FH Kuwait',true,'Own office']);
+ assert.deepEqual({...f.db.prepare('SELECT tour_id,shared_tour_id FROM tours WHERE id=?').get(extra.id)},{tour_id:null,shared_tour_id:'26/3205'});
+ const {cards}=await issue(f,extra.id);assert.deepEqual(cards.map(c=>[c.tour_id,c.person_no,c.arrival,c.departure]),[['26/3205',1,'2026-10-22','2026-10-25'],['26/3205',2,'2026-10-22','2026-10-25']]);
+ assert.deepEqual((await f.admin.get('/api/tours').query({q:'26/3205'}).expect(200)).body.map(t=>t.tour_id),['26/3205','26/3205','26/3205']);
+ f.setTime('2026-10-22T09:30:00Z');
+ for(const c of [...cards,...first])assert.equal((await scan(f,c.token)).body.status,'green');
+ const logs=(await f.admin.get('/api/logs').query({tour:'3205'}).expect(200)).body;assert.equal(logs.length,3);assert.ok(logs.every(l=>l.display_tour==='26/3205'));
+ assert.deepEqual((await f.admin.get('/api/summary/tours?date=2026-10-22').expect(200)).body.map(t=>[t.tour_id,t.pax,t.lunch]),[['26/3205',1,1],['26/3205',2,2],['26/3205',1,0]]);
+ // The Sheet sync never takes over, skips for, or changes a stay added under an ID already in the app.
+ const sync=tours=>request(f.app).post('/api/sync/tours').set('Authorization',`Bearer ${config.syncToken}`).send({spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours',tours});
+ await sync([{tour_id:'26/3205',office:'FH Kuwait',arrival:'2026-10-21',departure:'2026-10-24',pax:1}]).expect(200);
+ assert.deepEqual((await f.admin.get('/api/settings')).body.sync.warnings,[]);
+ assert.deepEqual({...f.db.prepare('SELECT pax,arrival,departure,active,source FROM tours WHERE id=?').get(extra.id)},{pax:2,arrival:'2026-10-22',departure:'2026-10-25',active:1,source:'manual'});
+ assert.equal((await scan(f,cards[1].token)).body.reason,'already_scanned');
  }finally{f.close();}
 });
 

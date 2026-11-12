@@ -102,6 +102,8 @@ td small{font-size:.875rem}
 .muted{color:var(--muted)}
 .warning-note{border-left:3px solid var(--gold);padding-left:14px;margin:14px 0}
 .status-note{font-size:.9375rem;color:var(--muted)}
+.existing-tour{margin:0;padding:12px 16px;border-radius:12px;border:1px solid #2c6b4c;background:#143a2a;color:var(--green-text);font-size:1rem;line-height:1.5}
+.existing-tour[hidden]{display:none}
 .loading{padding:80px 24px;text-align:center;color:var(--muted);font-size:1.0625rem}
 /* Storage */
 .meter{height:12px;border-radius:999px;background:#0e1726;border:1px solid var(--line);overflow:hidden;margin:6px 0 10px}

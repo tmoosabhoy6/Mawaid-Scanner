@@ -10,7 +10,7 @@ import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -138,7 +138,8 @@ test('Cloudflare: a corrected arrival date moves the stay with its cards, and on
  assert.equal((await sync([moved])).status,200);
  const listed=async()=>(await f.call('/tours')).data;const stay=(await listed())[0],b=await f.issue(stay.id);
  // Typed by hand without the 26/ prefix before the Sheet listed it.
- const manual=await f.tour(3,{tour_id:'2846',arrival:'2026-10-22',departure:'2026-10-23'}),m=await f.issue(manual.id);
+ // (Before Add tour required the full tour ID.)
+ const manual={id:'manual'};await f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('manual','2846','Test office','2026-10-22','2026-10-23',3,'x')").run();const m=await f.issue(manual.id);
  // A refused sync is shown in Settings until the next one succeeds.
  assert.equal((await sync([moved],'Other')).status,409);
  assert.match((await f.call('/settings')).data.syncError.message,/does not match/);
@@ -272,22 +273,22 @@ test('Cloudflare UI: failed PDF upload recovers the same cards through Print log
  }finally{dom?.window.close();await f.close();}
 });
 
-test('Cloudflare: optional tour ID and ITS; Safari cards are stored without QR cards',async()=>{
+test('Cloudflare: add tour needs the full tour ID; an ID already in the app adds cards under it; Safari cards have no QR',async()=>{
  const f=await fixture();try{
  const base={office:'Walk-in',arrival:'2026-10-21',departure:'2026-10-24',pax:1};
- const a=await f.call('/tours',{...base,its:'30412345'}),b=await f.call('/tours',{...base,tour_id:' '});
- assert.equal(a.status,201);assert.equal(b.status,201);assert.equal(a.data.tour_id,null);assert.notEqual(a.data.id,b.data.id);
- assert.deepEqual((await f.call('/tours?q=30412345')).data.map(t=>t.id),[a.data.id]);
- const issued=await f.issue(a.data.id);assert.equal(issued.cards[0].tour_id,null);assert.equal((await f.scan(issued.cards[0].token)).data.status,'green');
- const listed=await f.call('/tours',{...base,tour_id:'26/9'});assert.equal(listed.status,201);
- // A tour ID already used for overlapping dates is refused with a clear reason, never merged into the listed tour.
- const clash=await f.call('/tours',{...base,tour_id:'26/9',pax:4,arrival:'2026-10-23',departure:'2026-10-26'});
- assert.equal(clash.status,409);assert.match(clash.data.error,/Tour ID 26\/9 is already used for 2026-10-21 to 2026-10-24/);
- // Every tour added by hand is new, with its own cards, even with the Sheet's ID typed without 26/.
- const bare=await f.call('/tours',{...base,tour_id:'9',arrival:'2026-10-23',departure:'2026-10-23',pax:2});
- assert.equal(bare.status,201);assert.notEqual(bare.data.id,listed.data.id);assert.equal(bare.data.existing,undefined);
- assert.equal((await f.issue(bare.data.id)).cards.length,2);
- assert.equal((await f.call('/tours',{...base,tour_id:'26/9',arrival:'2026-10-25',departure:'2026-10-26'})).status,201);
+ for(const tour_id of [undefined,' ','9','2026/9','26-9'])assert.equal((await f.call('/tours',{...base,tour_id})).status,400,String(tour_id));
+ assert.match((await f.call('/tours',{...base,tour_id:'26/9',office:''})).data.error,/office name/);
+ const listed=await f.call('/tours',{...base,tour_id:'26/9',its:'30412345'});assert.equal(listed.status,201);assert.equal(listed.data.shared,false);
+ assert.deepEqual((await f.call('/tours?q=30412345')).data.map(t=>t.id),[listed.data.id]);
+ // The same ID for overlapping dates, and for the same arrival, adds a stay under that ID; its office is filled in.
+ const extra=await f.call('/tours',{tour_id:'26/9',pax:2,arrival:'2026-10-23',departure:'2026-10-26'}),same=await f.call('/tours',{...base,tour_id:' 26/9 '});
+ assert.equal(extra.status,201);assert.equal(same.status,201);assert.deepEqual([extra.data.tour_id,extra.data.office,extra.data.shared],['26/9','Walk-in',true]);
+ assert.deepEqual(await f.db.prepare('SELECT tour_id,shared_tour_id FROM tours WHERE id=?').bind(extra.data.id).first(),{tour_id:null,shared_tour_id:'26/9'});
+ const issued=await f.issue(extra.data.id);assert.deepEqual(issued.cards.map(c=>c.tour_id),['26/9','26/9']);
+ assert.deepEqual((await f.call('/tours?q=26/9')).data.map(t=>t.tour_id),['26/9','26/9','26/9']);
+ f.setTime('2026-10-23T09:30:00Z');assert.equal((await f.scan(issued.cards[0].token)).data.status,'green');
+ assert.deepEqual((await f.call('/logs?tour=26/9')).data.map(l=>l.display_tour),['26/9']);
+ assert.deepEqual((await f.call('/summary/tours?date=2026-10-23')).data.map(t=>t.tour_id),['26/9','26/9','26/9']);
  const safari=await f.call('/safaris',{office:'Izan Caravan',arrival:'2026-10-21',departure:'2026-10-24',pax:12});assert.equal(safari.status,201);
  assert.equal((await f.call('/safaris',{})).status,201);assert.equal((await f.call('/safaris',{pax:-1})).status,400);
  assert.deepEqual((await f.call('/safaris?q=izan')).data.map(s=>s.id),[safari.data.id]);assert.equal((await f.call('/safaris')).data.length,2);

@@ -80,8 +80,8 @@ export async function drawLabels(doc, cards, settings, createQr) {
   for (const c of cards) {
     doc.addPage();
     const qr = await createQr(`MW1:${c.token}`, { errorCorrectionLevel: 'M' });
-    // Each line is its caption and value; the person's number prints as "PAX #1". The tour ID is printed larger.
-    const lines = [['Tour: ', c.tour_id || '—', TOUR_SCALE], ['Office: ', c.office], ['PAX #', c.person_no], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
+    // Each line is its caption and value. The tour ID is printed larger. The person's number is not printed.
+    const lines = [['Tour: ', c.tour_id || '—', TOUR_SCALE], ['Office: ', c.office], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
     const inset = onDots(mm(2));
     doc.lineWidth(LINE).strokeColor(INK).rect(inset, inset, w - inset * 2, h - inset * 2).stroke();
     if (compact) {

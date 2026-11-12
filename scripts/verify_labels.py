@@ -26,7 +26,7 @@ with pymupdf.open(folder / '50-labels.pdf') as doc:
     assert decoded == expected, 'PDF contains unexpected QR values'
     assert len(set(decoded)) == 50, 'QR values must be unique'
     assert 'Departure: 2026-10-23' in doc[0].get_text(), 'Departure date missing from the compact label'
-    assert 'PAX #1' in doc[0].get_text(), 'Person number missing from the compact label'
+    assert 'PAX' not in doc[0].get_text(), 'The person number must not be printed on the meal card'
     assert abs(doc[0].rect.width * 25.4 / 72 - 76.2) < .1
     assert abs(doc[0].rect.height * 25.4 / 72 - 50.8) < .1
 print('50 / 50 labels: unique expected QR values decoded at 203 dpi; 3 × 2 inch (76.2 × 50.8 mm) pages verified.')

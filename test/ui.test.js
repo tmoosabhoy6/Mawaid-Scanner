@@ -58,12 +58,12 @@ test('add tour submit persists to API; text from source is escaped; settings sav
  dom=domFor(f,'/#generate');const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('#addTour'));
  const form=d.querySelector('#addTour');
- assert.equal(form.querySelector('[name=tour_id]').required,false);assert.equal(form.querySelector('[name=its]').required,false);
- for(const [key,value]of Object.entries({office:'<script>globalThis.bad=true</script>',its:'30412345',arrival:'2026-10-21',departure:'2026-10-22',pax:'3'}))form.querySelector(`[name=${key}]`).value=value;
+ assert.equal(form.querySelector('[name=tour_id]').required,true);assert.equal(form.querySelector('[name=its]').required,false);
+ for(const [key,value]of Object.entries({tour_id:'26/4100',office:'<script>globalThis.bad=true</script>',its:'30412345',arrival:'2026-10-21',departure:'2026-10-22',pax:'3'}))form.querySelector(`[name=${key}]`).value=value;
  submit(w,form,form.querySelector('[value=save]'));
  await waitFor(()=>d.querySelectorAll('.tour-check').length===1);
  assert.ok(d.querySelector('#tourTable').textContent.includes('<script>'));assert.equal(w.bad,undefined);assert.equal(d.querySelector('#tourTable script'),null);
- assert.match(d.querySelector('#tourTable tbody').textContent,/30412345/);assert.equal(f.db.prepare('SELECT tour_id FROM tours').get().tour_id,null);
+ assert.match(d.querySelector('#tourTable tbody').textContent,/30412345/);assert.equal(f.db.prepare('SELECT tour_id FROM tours').get().tour_id,'26/4100');
  w.location.hash='settings';await waitFor(()=>d.querySelector('#sourceSettings'));
  d.querySelector('[name=dailyTimes]').value='06:00, 12:00';submit(w,d.querySelector('#sourceSettings'));
  await waitFor(()=>{const row=f.db.prepare("SELECT value FROM settings WHERE key='source'").get();return row&&JSON.parse(row.value).dailyTimes?.length===2;});
@@ -320,20 +320,41 @@ test('By tour groups offices, then sorts most scans first for the current Karbal
  }finally{dom?.window.close();f.close();}
 });
 
-test('add tour always adds a new tour with new cards; a clashing tour ID is explained',async()=>{
+test('add tour needs the full tour ID; an ID already in the app asks only for PAX and dates, with no person list',async()=>{
  const f=await fixture();let dom;try{
  const listed=await tour(f,2);await issue(f,listed.id);
  dom=domFor(f,'/#generate');const w=dom.window,d=w.document;
  await waitFor(()=>d.querySelector('#addTour'));
- assert.doesNotMatch(d.querySelector('#addTour').textContent,/Replace cards/);assert.match(d.querySelector('#addTour').textContent,/Tour ID \(optional\)/);
- const form=d.querySelector('#addTour'),fill=values=>{for(const [key,value] of Object.entries(values))form.querySelector(`[name=${key}]`).value=value;};
- fill({tour_id:'26/3205',office:'FH Kuwait',pax:'1',arrival:'2026-10-21',departure:'2026-10-23'});
+ const form=d.querySelector('#addTour'),id=form.querySelector('[name=tour_id]'),office=form.querySelector('[name=office]');
+ assert.doesNotMatch(form.textContent,/Replace cards|optional\)\s*$/);assert.equal(id.required,true);assert.match(id.placeholder,/26\/5253/);
+ const fill=values=>{for(const [key,value] of Object.entries(values))form.querySelector(`[name=${key}]`).value=value;};
+ // The short form is refused with a clear reason (the browser checks the pattern too).
+ fill({tour_id:'3205',office:'FH Kuwait',pax:'1',arrival:'2026-10-21',departure:'2026-10-23'});
+ assert.ok(new RegExp(`^(?:${id.pattern})$`,'v').test('26/3205')&&!new RegExp(`^(?:${id.pattern})$`,'v').test('3205'));
  submit(w,form,form.querySelector('[value=save]'));
- await waitFor(()=>/Tour ID 26\/3205 is already used for 2026-10-21 to 2026-10-23/.test(d.querySelector('#notice').textContent));
- assert.equal(d.querySelector('#peopleDialog').hasAttribute('open'),false);
- fill({tour_id:''});submit(w,form,form.querySelector('[value=save]'));
+ await waitFor(()=>/full tour ID with its year, such as 26\/5253/.test(d.querySelector('#notice').textContent));
+ // Typing a tour ID already in the app says so and fills in its office; only PAX and dates remain.
+ fill({office:''});id.value='26/3205';id.dispatchEvent(new w.Event('input',{bubbles:true}));
+ await waitFor(()=>!d.querySelector('#existingTour').hidden);
+ assert.match(d.querySelector('#existingTour').textContent,/Tour 26\/3205 is already in the app \(FH Kuwait, 2026-10-21 to 2026-10-23\)/);
+ assert.equal(office.value,'FH Kuwait');assert.equal(office.required,false);
+ fill({pax:'3',arrival:'2026-10-22',departure:'2026-10-24'});submit(w,form,form.querySelector('[value=save]'));
  await waitFor(()=>f.db.prepare('SELECT COUNT(*) AS n FROM tours').get().n===2);
- assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM tours WHERE tour_id IS NULL AND pax=1').get().n,1);
+ assert.deepEqual({...f.db.prepare('SELECT tour_id,shared_tour_id,office,pax,arrival,departure FROM tours WHERE shared_tour_id IS NOT NULL').get()},{tour_id:null,shared_tour_id:'26/3205',office:'FH Kuwait',pax:3,arrival:'2026-10-22',departure:'2026-10-24'});
+ assert.equal(d.querySelector('#peopleDialog').hasAttribute('open'),false);
+ await waitFor(()=>/Cards added under tour 26\/3205/.test(d.querySelector('#notice').textContent));
+ // Back on Tours, a search for the ID lists both stays under it; the new one is ready to print.
+ await waitFor(()=>d.querySelector('#tourFilters'));d.querySelector('#tourFilters [name=q]').value='26/3205';submit(w,d.querySelector('#tourFilters'));
+ await waitFor(()=>d.querySelectorAll('#tourTable tbody tr').length===2);
+ assert.equal(d.querySelectorAll('.tour-check:not(:disabled)').length,1);
+ assert.deepEqual([...d.querySelectorAll('#tourTable tbody tr td:nth-child(2)')].map(c=>c.textContent),['26/3205','26/3205']);
+ // A different ID clears the filled-in office and asks for it again.
+ w.location.hash='generate';await waitFor(()=>d.querySelector('#addTour [name=tour_id]'));
+ const again=d.querySelector('#addTour');again.querySelector('[name=tour_id]').value='26/3205';again.querySelector('[name=tour_id]').dispatchEvent(new w.Event('input',{bubbles:true}));
+ await waitFor(()=>again.querySelector('[name=office]').value==='FH Kuwait');
+ again.querySelector('[name=tour_id]').value='26/9999';again.querySelector('[name=tour_id]').dispatchEvent(new w.Event('input',{bubbles:true}));
+ await waitFor(()=>d.querySelector('#existingTour').hidden&&again.querySelector('[name=office]').value==='');
+ assert.equal(again.querySelector('[name=office]').required,true);
  }finally{dom?.window.close();f.close();}
 });
 

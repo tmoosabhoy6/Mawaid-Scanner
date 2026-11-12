@@ -1,18 +1,19 @@
 // Archive export and storage clean-up, shared by the Node server and the Cloudflare Worker.
 // Parameters: ?1 = clear records dated before this Karbala date, ?2 = rowid cursor, ?3 = page size.
-import { validDate } from './rules.js';
+import { validDate, tourIdSql } from './rules.js';
+const TOUR_ID = `${tourIdSql('t.')} AS tour_id`;
 export const ARCHIVE_PAGE = 1000, CLEAR_ROWS = 1000, CLEAR_PDFS = 20;
 // Cloudflare's free plan allows 100,000 rows written per day (UTC), counting index rows and deletes.
 // Clean-up stops at 40,000 so scanning and printing always keep most of the daily allowance.
 export const CLEANUP_WRITE_BUDGET = 40_000, CLEANUP_CHUNK_WRITES = 8_000;
 export const ARCHIVE_DATASETS = {
-  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,t.tour_id,t.office,s.person_no,s.reason,s.offline,s.gate FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
+  scans: `SELECT s.id AS cursor,s.scanned_at,s.date,s.meal,${TOUR_ID},t.office,s.person_no,s.reason,s.offline,s.gate FROM scan_logs s LEFT JOIN tours t ON t.id=s.tour_id
     WHERE s.date<?1 AND s.id>?2 ORDER BY s.id LIMIT ?3`,
-  meals: `SELECT a.rowid AS cursor,a.date,a.meal,a.scanned_at,t.id AS tour_key,t.tour_id,t.office,p.person_no FROM admissions a JOIN people p ON p.id=a.person_id JOIN tours t ON t.id=p.tour_id
+  meals: `SELECT a.rowid AS cursor,a.date,a.meal,a.scanned_at,t.id AS tour_key,${TOUR_ID},t.office,p.person_no FROM admissions a JOIN people p ON p.id=a.person_id JOIN tours t ON t.id=p.tour_id
     WHERE a.date<?1 AND a.rowid>?2 ORDER BY a.rowid LIMIT ?3`,
-  tours: `SELECT t.rowid AS cursor,t.id AS tour_key,t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.source,t.active,t.created_at,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued
+  tours: `SELECT t.rowid AS cursor,t.id AS tour_key,${TOUR_ID},t.its,t.office,t.arrival,t.departure,t.pax,t.source,t.active,t.created_at,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued
     FROM tours t WHERE ?1<>'' AND t.rowid>?2 ORDER BY t.rowid LIMIT ?3`,
-  cards: `SELECT c.rowid AS cursor,t.tour_id,t.office,t.arrival,p.person_no,c.created_at,c.revoked_at,c.batch_id FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id
+  cards: `SELECT c.rowid AS cursor,${TOUR_ID},t.office,t.arrival,p.person_no,c.created_at,c.revoked_at,c.batch_id FROM cards c JOIN people p ON p.id=c.person_id JOIN tours t ON t.id=p.tour_id
     WHERE ?1<>'' AND c.rowid>?2 ORDER BY c.rowid LIMIT ?3`,
   prints: `SELECT b.rowid AS cursor,b.id AS batch_id,b.created_at,b.kind,b.printer_status,b.pdf IS NOT NULL AS pdf_saved,(SELECT COUNT(*) FROM cards c WHERE c.batch_id=b.id)+(SELECT COUNT(*) FROM safari_prints s WHERE s.batch_id=b.id) AS labels
     FROM batches b WHERE ?1<>'' AND b.rowid>?2 ORDER BY b.rowid LIMIT ?3`,

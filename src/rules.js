@@ -33,12 +33,16 @@ export function validDate(value) {
     !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 }
 const text = value => String(value ?? '').trim();
-// Tour ID and ITS are optional for tours added by hand; the Google Sheet sync always sends a tour ID.
-export function validateTour(input, { requireId = true } = {}) {
-  const tour = { tour_id: text(input.tour_id) || null, its: text(input.its) || null, office: text(input.office),
-    arrival: input.arrival, departure: input.departure, pax: Number(input.pax) };
-  if (requireId && !tour.tour_id) throw new Error('Enter a tour ID.');
-  if ((tour.tour_id || '').length > 80 || !tour.office || tour.office.length > 160) throw new Error('Enter an office name (maximum 160 characters) and a tour ID of up to 80 characters.');
+// Tours added by hand need the tour ID in the Google Sheet's full form: the year, a slash and the tour number.
+export const TOUR_ID_FORMAT = /^\d{2}\/\d{1,6}$/;
+// Every tour needs a tour ID. ITS is optional. A tour added by hand (manual) must use the full form, such as 26/5253,
+// and may leave the office blank when its tour ID is already in the app: the server then uses that tour's office.
+export function validateTour(input, { manual = false } = {}) {
+  const tour = { tour_id: manual ? text(input.tour_id).replace(/\s+/g, '') : text(input.tour_id), its: text(input.its) || null,
+    office: text(input.office), arrival: input.arrival, departure: input.departure, pax: Number(input.pax) };
+  if (!tour.tour_id) throw new Error(manual ? 'Enter the tour ID, such as 26/5253.' : 'Enter a tour ID.');
+  if (manual && !TOUR_ID_FORMAT.test(tour.tour_id)) throw new Error('Enter the full tour ID with its year, such as 26/5253.');
+  if (tour.tour_id.length > 80 || (!manual && !tour.office) || tour.office.length > 160) throw new Error('Enter an office name (maximum 160 characters) and a tour ID of up to 80 characters.');
   if ((tour.its || '').length > 40) throw new Error('ITS can be up to 40 characters.');
   if (!validDate(tour.arrival) || !validDate(tour.departure) || tour.arrival > tour.departure) throw new Error('Enter valid arrival and departure dates in order.');
   if (!Number.isInteger(tour.pax) || tour.pax < 1 || tour.pax > 10000) throw new Error('PAX must be a whole number from 1 to 10,000.');
@@ -47,10 +51,14 @@ export function validateTour(input, { requireId = true } = {}) {
 // The Google Sheet writes tour IDs with a year prefix ("26/2849"); staff adding a tour by hand often type "2849".
 // The Sheet sync uses this to take over a tour added by hand before the Sheet listed it (see sync-plan.js).
 export const bareTourId = id => String(id).toLowerCase().replace(/^\d{2}\//, '');
-// A tour added by hand is always a new tour with its own cards. Its tour ID is optional, but one tour ID cannot hold
-// two overlapping stays (the database refuses it), so this finds the stay that would clash. Params: tour ID, arrival, departure.
-export const TOUR_ID_CLASH_SQL = 'SELECT tour_id,arrival,departure FROM tours WHERE tour_id=? AND arrival<=? AND departure>=? LIMIT 1';
-export const tourIdClash = clash => `Tour ID ${clash.tour_id} is already used for ${clash.arrival} to ${clash.departure}. Leave the tour ID blank, or use another one, to add these guests as a new tour with new cards.`;
+// A tour's ID as listed and printed: a stay added under an ID already in the app keeps it in shared_tour_id.
+// p is the table prefix, such as 't.'.
+export const tourIdSql = p => `COALESCE(${p}tour_id,${p}shared_tour_id)`;
+// A tour added by hand is always a new tour with its own cards. When its tour ID is already in the app (any stay,
+// any dates), the new stay keeps the ID in shared_tour_id: guests only choose PAX and dates, and the one-stay-per-ID
+// rule and the Sheet sync never see it. This finds that tour, the current one first, for its office. Param: tour ID.
+export const EXISTING_TOUR_SQL = 'SELECT office FROM tours WHERE tour_id=?1 OR shared_tour_id=?1 ORDER BY active DESC,arrival DESC LIMIT 1';
+export const MISSING_OFFICE = 'Enter the office name. It can be left blank only when the tour ID is already in the app.';
 // Safari (takeaway) cards have no QR code, and every field is optional.
 export function validateSafari(input) {
   const blank = value => value === undefined || value === null || value === '';
