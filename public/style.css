@@ -153,6 +153,12 @@ dialog::backdrop{background:rgba(3,6,12,.7)}
 .camera-box:empty:after{content:'Camera preview';color:#a3afc1}
 #reader video{max-width:100%}
 .scanner-shell .primary,#startCamera{width:100%}
+/* Card number typed under the camera when a QR will not scan */
+.number-scan{margin:-6px 0 18px}
+.number-scan label{display:block;color:var(--muted);font-size:.9375rem;margin-bottom:6px}
+.number-scan div{display:flex;gap:8px}
+.number-scan input{flex:1;min-width:0;font-size:1.625rem;font-weight:600;letter-spacing:.08em;text-align:center;font-variant-numeric:tabular-nums;padding:10px 12px}
+.scanner-shell .number-scan .primary{width:auto;flex:none;padding-inline:22px;font-size:1.0625rem}
 .manual{margin-top:22px}
 .manual summary{cursor:pointer;color:var(--muted)}
 .manual form{display:flex;gap:8px;margin-top:12px}

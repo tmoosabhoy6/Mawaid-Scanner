@@ -504,3 +504,53 @@ test('scanner tabs: Men’s and Women’s scans are recorded, kept offline, and 
  await waitFor(()=>a.querySelectorAll('#logTable tbody tr').length===1);
  }finally{dom?.window.close();admin?.window.close();f.close();}
 });
+
+test('scanner: a card number typed under the camera is checked online and offline, like its QR',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,3),{cards}=await issue(f,t.id);f.setTime('2026-10-21T10:22:00Z');
+ // A phone that saved its card list before card numbers existed downloads it again in full.
+ const stale={hash:'hex',cards:{old:['p','t',1,0]},tours:{},served:{},servedDate:'2026-10-21',cardCursor:99,admissionCursor:0};
+ dom=new JSDOM(html,{url:'http://localhost:3000/scanner',runScripts:'outside-only',pretendToBeVisual:true});dom.window.localStorage.setItem('mawaidScannerData',JSON.stringify(stale));dom.window.close();
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false,requests=[];
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');requests.push(url);return online(url,options);};
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ const saved=JSON.parse(w.localStorage.getItem('mawaidScannerData'));
+ assert.equal(saved.v,2);assert.equal(saved.cards.old,undefined,'the old list was replaced');
+ assert.deepEqual(Object.values(saved.cards).map(c=>c.slice(4)).sort(),[[1,'3205'],[2,'3205'],[3,'3205']]);
+ // The number box sits right under the camera preview, on the same screen, with a number keypad.
+ const form=d.querySelector('#numberScan'),input=d.querySelector('#cardNumber');
+ assert.equal(d.querySelector('#reader').nextElementSibling,form);assert.equal(input.getAttribute('inputmode'),'numeric');
+ const send=value=>{input.value=value;submit(w,form);},result=()=>d.querySelector('#scanResult'),clear=()=>{result().className='scan-result';};
+ send(' 01 3205 ');
+ await waitFor(()=>result().classList.contains('green'));
+ assert.equal(d.querySelector('#flash').className,'flash green');assert.match(result().textContent,/ALLOW/);assert.match(result().textContent,/No\. 013205/);
+ assert.equal(input.value,'','the box is cleared for the next guest');
+ assert.deepEqual({...f.db.prepare('SELECT person_id,typed_code,reason,offline FROM scan_logs').get()},{person_id:cards[0].person_id,typed_code:'013205',reason:'admitted',offline:0});
+ // Not a card number: red at once, without asking the server.
+ await new Promise(r=>setTimeout(r,500));clear();const before=requests.length;send('12a');
+ await waitFor(()=>result().classList.contains('red'));assert.match(result().textContent,/not a card number/);assert.equal(requests.length,before);
+ // A USB scanner typing a QR value into the box is checked as that QR.
+ await new Promise(r=>setTimeout(r,1400));clear();send(`MW1:${cards[1].token}`);
+ await waitFor(()=>result().classList.contains('green'));assert.match(result().textContent,/Person 2/);
+ // Offline: the phone finds the card by its number and applies the same rules.
+ offline=true;await new Promise(r=>setTimeout(r,500));clear();send('033205');
+ await waitFor(()=>result().classList.contains('green'));assert.match(result().textContent,/Checked offline/);assert.match(result().textContent,/No\. 033205/);
+ await new Promise(r=>setTimeout(r,3100));clear();send('033205');
+ await waitFor(()=>result().querySelector('strong').textContent==='ALREADY SCANNED');
+ await new Promise(r=>setTimeout(r,1400));clear();send('013205');
+ await waitFor(()=>result().querySelector('strong').textContent==='ALREADY SCANNED');
+ await new Promise(r=>setTimeout(r,1400));clear();send('093205');
+ await waitFor(()=>/No card on this phone’s list has this number/.test(result().textContent));
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,4);
+ // Back online: the typed scans are sent with their numbers and recorded as offline.
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT typed_code,reason,offline FROM scan_logs WHERE offline=1 ORDER BY id').all().map(r=>[r.typed_code,r.reason]),
+  [['033205','admitted'],['033205','already_scanned'],['013205','already_scanned'],['093205','unknown_number']]);
+ // The scan log marks typed scans.
+ const admin=domFor(f,'/');try{const a=admin.window.document;admin.window.location.hash='#logs';
+  await waitFor(()=>a.querySelector('#logTable table'));assert.equal([...a.querySelectorAll('#logTable .chip')].filter(c=>/^Typed \d+$/.test(c.textContent)).length,5);
+ }finally{admin.window.close();}
+ }finally{dom?.window.close();f.close();}
+});

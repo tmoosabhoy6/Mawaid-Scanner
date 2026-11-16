@@ -45,7 +45,9 @@ test('a database from before optional tour IDs is upgraded in place, keeping eve
  assert.deepEqual(db.prepare('SELECT rowid,id,tour_id,its FROM tours ORDER BY rowid').all().map(r=>({...r})),[{rowid:1,id:'t1',tour_id:'26/1',its:null},{rowid:2,id:'t2',tour_id:'26/2',its:null}]);
  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys,1);
  db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,created_at) VALUES('t3',NULL,'C','2026-10-21','2026-10-22',1,'x'),('t4',NULL,'D','2026-10-21','2026-10-22',1,'x')").run();
- assert.throws(()=>db.prepare("INSERT INTO people VALUES('p9','missing',1)").run(),/FOREIGN KEY/);
+ assert.throws(()=>db.prepare("INSERT INTO people(id,tour_id,person_no) VALUES('p9','missing',1)").run(),/FOREIGN KEY/);
+ // People printed before card numbers keep their person number as their sticker number, under the tour number.
+ assert.deepEqual({...db.prepare("SELECT sticker_no,sticker_tour FROM people WHERE id='p1'").get()},{sticker_no:1,sticker_tour:'2'});
  db.close();openDatabase(path).close();
  }finally{rmSync(dataDir,{recursive:true,force:true});}
 });

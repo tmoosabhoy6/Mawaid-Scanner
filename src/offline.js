@@ -2,15 +2,16 @@
 // The first download holds every current card and today's meals; after that each minute's poll reads only
 // cards and meals added since the phone's cursors. A person whose card was replaced (in the past) has a newer card,
 // so a phone that receives a person's new card treats that person's older cards as replaced. Tours are small and
-// are re-read every few minutes. Only random card hashes, dates and person numbers are sent — no names or offices.
+// are re-read every few minutes. Only random card hashes, dates, person numbers and the card numbers printed under
+// the QR (so a number typed at the gate can be checked offline too) are sent — no names or offices.
 const CURRENT_TOURS = 'SELECT id FROM tours WHERE departure>=?1';
 export const OFFLINE_SQL = {
   cardCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM cards',
   admissionCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM admissions',
   tours: `SELECT t.id,t.arrival,t.departure,t.pax,t.active FROM tours t WHERE t.id IN (${CURRENT_TOURS})`,
-  allCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked
+  allCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour
     FROM people p JOIN cards c ON c.person_id=p.id WHERE p.tour_id IN (${CURRENT_TOURS}) AND c.rowid<=?2`,
-  newCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked
+  newCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour
     FROM cards c JOIN people p ON p.id=c.person_id WHERE c.rowid>?1 AND c.rowid<=?2`,
   allAdmissions: 'SELECT person_id,meal FROM admissions WHERE date=?1 AND rowid<=?2',
   // NOT INDEXED keeps this to a rowid range, so a poll reads only the meals served since the last one.
@@ -25,7 +26,7 @@ export async function offlineData(all, url, service, hashFormat) {
   const cards = cardsAfter ? await all(OFFLINE_SQL.newCards, cardsAfter, cardCursor) : await all(OFFLINE_SQL.allCards, today, cardCursor);
   const admissions = admissionsAfter ? await all(OFFLINE_SQL.newAdmissions, admissionsAfter, admissionCursor, today) : await all(OFFLINE_SQL.allAdmissions, today, admissionCursor);
   const data = { ...service, hash: hashFormat, full: !cardsAfter, cardCursor, admissionCursor,
-    cards: cards.map(c => [c.token_hash, c.person_id, c.tour_id, c.person_no, c.revoked ? 1 : 0]),
+    cards: cards.map(c => [c.token_hash, c.person_id, c.tour_id, c.person_no, c.revoked ? 1 : 0, c.sticker_no ?? null, c.sticker_tour ?? null]),
     admissions: admissions.map(a => [a.person_id, a.meal]) };
   if (withTours) {
     data.tours = (await all(OFFLINE_SQL.tours, today)).map(t => [t.id, t.arrival, t.departure, t.pax, t.active ? 1 : 0]);

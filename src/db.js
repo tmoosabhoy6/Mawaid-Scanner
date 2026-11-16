@@ -50,6 +50,9 @@ export function openDatabase(path) {
   if (!db.prepare('PRAGMA table_info(tours)').all().some(c => c.name === 'shared_tour_id')) {
     transaction(db, () => db.exec(readFileSync(new URL('../cloudflare/migrations/0007_shared_tour_id.sql', import.meta.url), 'utf8')));
   }
+  if (!db.prepare('PRAGMA table_info(people)').all().some(c => c.name === 'sticker_no')) {
+    transaction(db, () => db.exec(readFileSync(new URL('../cloudflare/migrations/0008_card_numbers.sql', import.meta.url), 'utf8')));
+  }
   return db;
 }
 // Databases created before tour IDs became optional are rebuilt once, keeping every row and rowid.

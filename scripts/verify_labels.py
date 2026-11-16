@@ -12,6 +12,7 @@ import zxingcpp
 
 folder = Path(sys.argv[1])
 expected = json.loads((folder / 'expected.json').read_text())
+numbers = json.loads((folder / 'numbers.json').read_text())
 with pymupdf.open(folder / '50-labels.pdf') as doc:
     assert len(doc) == len(expected) == 50, 'Expected one label page per person'
     decoded = []
@@ -21,15 +22,17 @@ with pymupdf.open(folder / '50-labels.pdf') as doc:
         found = zxingcpp.read_barcodes(image)
         assert len(found) == 1, f'Page {number + 1}: expected one decodable QR'
         decoded.append(found[0].text)
+        assert numbers[number] in page.get_text().split(), f'Page {number + 1}: card number {numbers[number]} is not printed'
         if number == 0:
             image.save(folder / 'label-preview.png')
     assert decoded == expected, 'PDF contains unexpected QR values'
+    assert numbers[:3] == ['01' + numbers[0][2:], '02' + numbers[0][2:], '03' + numbers[0][2:]] and len(set(numbers)) == 50, 'Card numbers must run 01, 02, 03… and be unique'
     assert len(set(decoded)) == 50, 'QR values must be unique'
     assert 'Departure: 2026-10-23' in doc[0].get_text(), 'Departure date missing from the compact label'
     assert 'PAX' not in doc[0].get_text(), 'The person number must not be printed on the meal card'
     assert abs(doc[0].rect.width * 25.4 / 72 - 76.2) < .1
     assert abs(doc[0].rect.height * 25.4 / 72 - 50.8) < .1
-print('50 / 50 labels: unique expected QR values decoded at 203 dpi; 3 × 2 inch (76.2 × 50.8 mm) pages verified.')
+print('50 / 50 labels: unique expected QR values decoded at 203 dpi, each with its card number printed; 3 × 2 inch (76.2 × 50.8 mm) pages verified.')
 for name, width_mm, height_mm in [('min', 40, 80), ('compact-min', 70, 50.8), ('actual', 76.2, 50.8), ('max', 104, 200)]:
     with pymupdf.open(folder / f'boundary-{name}.pdf') as doc:
         assert len(doc) == 1, f'{name} layout overflowed onto another page'

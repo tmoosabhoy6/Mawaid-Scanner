@@ -7,7 +7,7 @@ import { createCanvas,loadImage } from '@napi-rs/canvas';
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
 import { writeFileSync,mkdirSync } from 'node:fs';
-const sample={token:'A'.repeat(43),tour_id:'26/1234',office:'A long office name for a narrow label layout',person_no:10000,arrival:'2026-10-21',departure:'2026-11-21',printed_at:'2026-10-21T04:00:00Z'};
+const sample={token:'A'.repeat(43),tour_id:'26/1234',office:'A long office name for a narrow label layout',person_no:10000,sticker_no:37,sticker_tour:'1234',arrival:'2026-10-21',departure:'2026-11-21',printed_at:'2026-10-21T04:00:00Z'};
 for(const [name,widthMm,heightMm] of [['min',40,80],['compact-min',70,50.8],['actual',76.2,50.8],['max',104,200]])test(`label layout ${widthMm} × ${heightMm} mm`,async()=>{
  const pdf=await makeLabels([sample],{widthMm,heightMm});assert.ok(pdf.length>1000);
  if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/boundary-${name}.pdf`,pdf);}
@@ -67,7 +67,8 @@ test('the tour ID is enlarged within the label and no text leaves the frame or o
    const {items}=await(await pdf.getPage(1)).getTextContent(),text=items.filter(i=>i.str.trim()).map(i=>({str:i.str,size:i.transform[0],x:i.transform[4],base:i.transform[5],width:i.width}));
    assert.ok(!text.some(i=>/Printed/.test(i.str)),`${where}: the printed stamp is gone`);
    // Inside the frame, which is drawn 2 mm in from each edge.
-   for(const i of text){assert.ok(i.x>=pt(2)&&i.x+i.width<=pt(widthMm-2),`${where}: "${i.str}" runs past the side of the frame`);assert.ok(i.base-i.size*DESC>=pt(2)&&i.base+i.size*ASC<=pt(heightMm-2),`${where}: "${i.str}" runs past the top or bottom of the frame`);}
+   // Digits have no descenders (only a 3% overshoot below the baseline), so the card number is measured by its digits.
+   for(const i of text){assert.ok(i.x>=pt(2)&&i.x+i.width<=pt(widthMm-2),`${where}: "${i.str}" runs past the side of the frame`);assert.ok(i.base-i.size*(/^\d+$/.test(i.str)?.03:DESC)>=pt(2)&&i.base+i.size*ASC<=pt(heightMm-2),`${where}: "${i.str}" runs past the top or bottom of the frame`);}
    // pdf.js merges the caption and value into one item when a long ID has fallen back to the ordinary size.
    const merged=text.find(i=>i.str.startsWith('Tour: ')&&i.str.length>6),caption=merged||text.find(i=>i.str.trim()==='Tour:'),value=merged||text.find(i=>i!==caption&&i.str.length>1&&tour_id.startsWith(i.str.replace('…','')));
    assert.ok(caption&&value,`${where}: tour line found`);
@@ -82,4 +83,38 @@ test('the tour ID is enlarged within the label and no text leaves the frame or o
    for(let n=1;n<lines.length;n++){const above=lines[n-1],below=lines[n];assert.ok(above.base-above.size*DESC>below.base+below.size*ASC,`${where}: "${above.str}" overlaps "${below.str}"`);}
   }finally{await pdf.destroy();}
  }
+});
+
+// The card number under the QR (person 37 of tour 26/1234 → 371234) is the largest text on the card, inside the frame and
+// clear of the QR's white border, which keeps its full width of 4 modules, at every supported label size. The QR keeps its size.
+test('the card number prints large under the QR without crowding it',async()=>{
+ const pdfjs=await import('pdfjs-dist/legacy/build/pdf.mjs'),standardFontDataUrl=new URL('../node_modules/pdfjs-dist/standard_fonts/',import.meta.url).pathname;
+ const pt=mm=>mm*72/25.4;
+ for(const card of [sample,{...sample,sticker_no:123,sticker_tour:'123456'}])for(const [widthMm,heightMm] of [[40,80],[70,50.8],[76.2,50.8],[104,200]]){
+  const code=`${String(card.sticker_no).padStart(2,'0')}${card.sticker_tour}`,where=`${code} on ${widthMm} × ${heightMm} mm`;
+  // The QR is drawn as filled rectangles; its dark modules' extent comes from the uncompressed page.
+  const doc=new PDFDocument({size:[pt(widthMm),pt(heightMm)],compress:false,autoFirstPage:false}),chunks=[];doc.on('data',c=>chunks.push(c));
+  const done=new Promise(r=>doc.on('end',r));await drawLabels(doc,[card],{widthMm,heightMm},(t,o)=>QRCode.create(t,o));doc.end();await done;
+  const raw=Buffer.concat(chunks),qr=QRCode.create('MW1:'+card.token,{errorCorrectionLevel:'M'}),modules=qr.modules.size;
+  const rects=[...raw.toString('latin1').matchAll(/^([\d.-]+) ([\d.-]+) ([\d.]+) ([\d.]+) re$/gm)].map(m=>m.slice(1).map(Number)).filter(r=>r[2]<pt(widthMm)*.9);
+  // pdfkit flips y: a rect's top in page coordinates (from the top) is height - y - h.
+  const qrBottom=Math.max(...rects.map(([,y])=>y)),qrLeft=Math.min(...rects.map(([x])=>x)),qrRight=Math.max(...rects.map(([x,,w])=>x+w));
+  const unit=(qrRight-qrLeft)/modules;
+  const pdf=await pdfjs.getDocument({data:new Uint8Array(raw),isEvalSupported:false,standardFontDataUrl}).promise;
+  try{
+   const {items}=await(await pdf.getPage(1)).getTextContent(),text=items.filter(i=>i.str.trim());
+   const number=text.find(i=>i.str===code);assert.ok(number,`${where}: card number printed`);
+   const size=number.transform[0],base=number.transform[5],digitTop=base+size*.72;
+   assert.ok(text.every(i=>i===number||i.transform[0]<size),`${where}: the card number is the largest text`);
+   assert.ok(size>=pt(4.5),`${where}: card number ${size.toFixed(1)} pt is large`);
+   // Below the QR's dark modules by at least the 4-module border, and inside the frame (2 mm in from the edge).
+   const qrDarkBottom=pt(heightMm)-qrBottom;
+   assert.ok(qrDarkBottom-digitTop>=4*unit-.5,`${where}: ${((qrDarkBottom-digitTop)/unit).toFixed(2)} modules between the QR and the number`);
+   assert.ok(base-size*.03>=pt(2.2)&&number.transform[4]>=pt(2.2)&&number.transform[4]+number.width<=pt(widthMm-2.2),`${where}: the number stays inside the frame`);
+   assert.ok(Math.abs((qrRight-qrLeft)/(modules)-unit)<1e-9);
+  }finally{await pdf.destroy();}
+ }
+ // A card without a number (a tour ID that is not a tour number) keeps the earlier layout exactly.
+ const plain={...sample,sticker_no:null,sticker_tour:null},a=await makeLabels([plain]),b=await makeLabels([{...plain,sticker_no:undefined}]);
+ assert.ok(!a.toString('latin1').includes('371234'));assert.equal(a.length,b.length);
 });

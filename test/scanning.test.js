@@ -59,7 +59,8 @@ test('gate phones download current cards once, then only what changed',async()=>
  const next=replaceCard(f,cards[0]);
  const poll=(await f.scanner.get(`/api/scanner/data?cards=${full.cardCursor}&admissions=${full.admissionCursor}&date=${full.date}`).expect(200)).body;
  assert.equal(poll.full,false);assert.equal(poll.tours,undefined);
- assert.deepEqual(poll.cards,[[hex(next.token),cards[0].person_id,t.id,1,0]]);
+ // Each card also carries the card number printed under its QR: sticker number 1 of tour 26/3205.
+ assert.deepEqual(poll.cards,[[hex(next.token),cards[0].person_id,t.id,1,0,1,'3205']]);
  assert.deepEqual(poll.admissions,[[cards[0].person_id,'breakfast']]);
  const quiet=(await f.scanner.get(`/api/scanner/data?cards=${poll.cardCursor}&admissions=${poll.admissionCursor}&date=${poll.date}&tours=1`).expect(200)).body;
  assert.deepEqual([quiet.cards,quiet.admissions,quiet.tours.length],[[],[],1]);

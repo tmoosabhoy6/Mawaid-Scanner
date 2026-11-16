@@ -1,5 +1,6 @@
 import { KARBALA_CALLIGRAPHY as ART } from './karbala-calligraphy.js';
 import { FAIZ_LOGO as LOGO } from './faiz-e-husaini-logo.js';
+import { stickerCode } from './sticker.js';
 const mm = n => n * 72 / 25.4;
 // The ZD220D is monochrome: any colour or grey is halftoned into scattered dots by the driver, so every mark on the
 // meal card is solid black like the QR code. Lines are 3 printer dots thick with their edges on the dot grid.
@@ -74,20 +75,38 @@ function detailSize(doc, width, max) {
   doc.font('Helvetica-Bold').fontSize(10);
   return Math.min(max, 10 * width / doc.widthOfString('Departure: 0000-00-00'));
 }
+// The card number under the QR (see sticker.js) is drawn in bold Helvetica digits, whose height is 0.72 of the font size.
+// Its glyph tops sit on the y passed to text(), so the gap above the number is exactly the space left above it.
+const DIGIT_HEIGHT = .72;
+function drawNumber(doc, code, centerX, top, size) {
+  bold(doc, 'Helvetica-Bold', size).text(code, centerX - doc.widthOfString(code) / 2, top - (doc._font.ascender / 1000 - DIGIT_HEIGHT) * size, { ...BOLD, lineBreak: false });
+}
 export async function drawLabels(doc, cards, settings, createQr) {
   const { widthMm = 76.2, heightMm = 50.8 } = settings;
   const w = mm(widthMm), h = mm(heightMm), compact = heightMm < 80;
   for (const c of cards) {
     doc.addPage();
     const qr = await createQr(`MW1:${c.token}`, { errorCorrectionLevel: 'M' });
-    // Each line is its caption and value. The tour ID is printed larger. The person's number is not printed.
+    // Each line is its caption and value. The tour ID is printed larger. The person's number within their stay is not
+    // printed; the card number under the QR (see sticker.js) is.
     const lines = [['Tour: ', c.tour_id || '—', TOUR_SCALE], ['Office: ', c.office], ['Arrival: ', c.arrival], ['Departure: ', c.departure]];
-    const inset = onDots(mm(2));
+    const inset = onDots(mm(2)), code = stickerCode(c.sticker_no, c.sticker_tour);
     doc.lineWidth(LINE).strokeColor(INK).rect(inset, inset, w - inset * 2, h - inset * 2).stroke();
     if (compact) {
       // QR on the left at full height; calligraphy heads the guest details on the right.
-      const qrMm = Math.min(heightMm - 7, widthMm - 39), qrTop = (heightMm - qrMm) / 2;
-      drawQr(doc, qr, mm(3), mm(qrTop), mm(qrMm));
+      const qrMm = Math.min(heightMm - 7, widthMm - 39);
+      if (code) {
+        // The card number fills the space under the QR. The QR keeps its size and moves up, so the white border it
+        // needs (QUIET modules, part of qrMm) stays clear on every side: above it, to the frame; below it, to the number.
+        // The number is as large as fits between the QR and the frame, at most 92% of the QR's width.
+        const frameTop = inset + LINE / 2, frameBottom = h - inset - LINE / 2, x = mm(3), qrW = mm(qrMm);
+        const above = mm(.8), below = mm(1.4), room = frameBottom - frameTop - above - qrW - below;
+        const size = Math.min(room / DIGIT_HEIGHT, sizeFor(doc, 'Helvetica-Bold', code, qrW * .92, mm(14)));
+        // Any height left over (taller labels) is shared equally above and below, keeping the pair centred.
+        const top = frameTop + above + (room - size * DIGIT_HEIGHT) / 2;
+        drawQr(doc, qr, x, top, qrW);
+        drawNumber(doc, code, x + qrW / 2, top + qrW, size);
+      } else drawQr(doc, qr, mm(3), mm((heightMm - qrMm) / 2), mm(qrMm));
       const x = mm(4 + qrMm), colW = w - x - mm(3.5), artW = Math.min(colW * .92, mm(30));
       let y = mm(3.6) + drawArt(doc, x + (colW - artW) / 2, mm(3.6), artW);
       bold(doc, 'Helvetica-Bold', 6).text('FAIZ-E-HUSAINI', x, y + mm(.9), { ...BOLD, width: colW, align: 'center', characterSpacing: .6, lineBreak: false });
@@ -103,13 +122,15 @@ export async function drawLabels(doc, cards, settings, createQr) {
       const nameSize = Math.min(size, 9);
       bold(doc, 'Helvetica-Bold', nameSize).text('FAIZ-E-HUSAINI', mm(4), y + mm(1.2), { ...BOLD, width: w - mm(8), align: 'center', characterSpacing: nameSize / 10, lineBreak: false });
       y += mm(2.4) + nameSize * 1.2;
-      // Reserve the detail block and a bottom margin before sizing the QR, so a label never spills onto a second page.
-      // The extra line held in reserve covers the enlarged tour ID, which is far less than one line taller.
-      const room = h - mm(5) - y - (lines.length + 1) * spacing;
-      const qrSize = Math.min(w - mm(8), room), block = qrSize + (lines.length + 1) * spacing;
+      // Reserve the detail block, the card number and a bottom margin before sizing the QR, so a label never spills onto
+      // a second page. The extra line held in reserve covers the enlarged tour ID, which is far less than one line taller.
+      const codeSize = code ? Math.min(size * 2.6, sizeFor(doc, 'Helvetica-Bold', code, textW, size * 2.6)) : 0, codeH = code ? codeSize * DIGIT_HEIGHT + mm(1.5) : 0;
+      const room = h - mm(5) - y - (lines.length + 1) * spacing - codeH;
+      const qrSize = Math.min(w - mm(8), room), block = qrSize + codeH + (lines.length + 1) * spacing;
       y += Math.max(0, (h - mm(5) - y - block) / 2);
       drawQr(doc, qr, (w - qrSize) / 2, y, qrSize);
       y += qrSize;
+      if (code) { drawNumber(doc, code, w / 2, y, codeSize); y += codeH; }
       details(doc, lines, mm(5), y, textW, size, spacing);
     }
   }

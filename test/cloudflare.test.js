@@ -9,8 +9,8 @@ import { JSDOM } from 'jsdom';
 import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
-const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql'];
+const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER|UPDATE))/).map(s=>s.trim()).filter(Boolean);
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql','0008_card_numbers.sql'];
 const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS){
  const credentials={...config,...overrides};
@@ -373,17 +373,22 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  await f.db.prepare("INSERT INTO batches(id,created_at,kind,request_key) VALUES('large-b','x','initial','large-b')").run();
  for(let chunk=0;chunk<20;chunk++){
   const people=Array.from({length:500},(_,n)=>{const i=chunk*500+n;return{id:`large-p${i}`,tour:`large-t${Math.floor(i/20)}`,n:i%20+1};});
-  await f.db.prepare(`INSERT INTO people SELECT json_extract(value,'$.id'),json_extract(value,'$.tour'),json_extract(value,'$.n') FROM json_each(?)`).bind(JSON.stringify(people)).run();
+  await f.db.prepare(`INSERT INTO people(id,tour_id,person_no) SELECT json_extract(value,'$.id'),json_extract(value,'$.tour'),json_extract(value,'$.n') FROM json_each(?)`).bind(JSON.stringify(people)).run();
   await f.db.prepare(`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.id'),'large-b',json_extract(value,'$.id'),'x' FROM json_each(?)`).bind(JSON.stringify(people)).run();
  }
  await f.db.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<20000)
  INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
  const scans=[];
  for(const [key,meal] of [['load-first','breakfast'],['load-lunch','lunch'],['load-duplicate','lunch'],['load-dinner','dinner']]) {
-   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0,'men').all();
+   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0,'men',null,null).all();
    assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
    assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
  }
+ // A typed card number reads only the few people holding it, through people_sticker, among 10,000 cards.
+ const {TYPED_SQL,typedParams}=await import('../src/sticker.js');
+ await f.db.prepare("UPDATE people SET sticker_no=person_no,sticker_tour=substr(tour_id,8)").run();
+ const typed=await f.db.prepare(TYPED_SQL).bind(...typedParams('07123')).all();
+ assert.deepEqual(typed.results.map(r=>r.person_id),['large-p2466']);assert.ok(typed.meta.rows_read<20,JSON.stringify(typed.meta));
  const query=tourList(),list=await f.db.prepare(query.sql).all();
  assert.equal(list.results.length,500);assert.ok(list.meta.rows_read<150000,JSON.stringify(list.meta));
  const summary=await f.db.prepare(SUMMARY_SQL).bind('2026-10-21').all();
@@ -417,8 +422,9 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  await f.db.prepare(`INSERT INTO scan_logs(request_key,date,meal,reason,scanned_at) VALUES('legacy1','2026-10-20',NULL,'admitted','x'),('legacy2','2026-10-20',NULL,'admitted','x'),('declined','2026-10-20',NULL,'unknown_card','x')`).run();
  const before=(await f.db.prepare('SELECT * FROM scan_logs').all()).results;
  for(const file of MIGRATIONS.slice(3))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
- // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner, NULL for earlier scans.
- assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null})));
+ // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner and 0008 the typed card
+ // number, both NULL for earlier scans.
+ assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null,typed_code:null})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
  const {gates,...totals}=counts;
  assert.deepEqual(totals,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});
@@ -466,5 +472,51 @@ test('Cloudflare: scans record the men’s or women’s scanner and the scan log
  assert.deepEqual([summary.lunch,summary.gates.men.lunch,summary.gates.women.lunch,summary.gates.none.scans],[2,1,1,0]);
  assert.deepEqual((await f.call('/summary/tours?date=2026-10-21&gate=women')).data.map(t=>[t.tour_id,t.lunch]),[['26/1',1]]);
  assert.deepEqual((await f.call('/summary/tours?date=2026-10-21')).data.map(t=>[t.tour_id,t.lunch]),[['26/1',2]]);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: cards are numbered when printed and a typed number is checked like the QR',async(ctx)=>{
+ const f=await fixture();try{
+ const t=await f.tour(2),b=await f.issue(t.id);
+ // The sealed manifest the printing computer draws from carries each card's number.
+ assert.deepEqual(b.cards.map(c=>[c.sticker_no,c.sticker_tour]),[[1,'1'],[2,'1']]);
+ assert.deepEqual((await f.call(`/batches/${b.id}/manifest`)).data.cards.map(c=>c.sticker_no),[1,2]);
+ // Lost cards added under the same tour ID while it is staying continue the numbers.
+ const extra=await f.tour(1,{office:'',arrival:'2026-10-22'}),e=await f.issue(extra.id);
+ assert.deepEqual(e.cards.map(c=>[c.person_no,c.sticker_no]),[[1,3]]);
+ f.setTime('2026-10-22T10:00:00Z');
+ const typed=(number,extra={})=>f.call('/scan',{number,requestKey:randomUUID(),...extra},'scanner');
+ const green=await typed('031',{gate:'men'});
+ assert.deepEqual([green.data.status,green.data.reason,green.data.person_id,green.data.typed_code],['green','admitted',e.cards[0].person_id,'031']);
+ assert.equal((await f.scan(e.cards[0].token)).data.reason,'already_scanned');
+ assert.equal((await typed('041')).data.reason,'unknown_number');assert.equal((await typed('x')).status,400);
+ // Gate phones get each card's number for checking offline.
+ const list=(await f.call('/scanner/data',undefined,'scanner')).data;
+ assert.deepEqual(list.cards.map(c=>c.slice(5)).sort(),[[1,'1'],[2,'1'],[3,'1']]);
+ // Two computers printing for the same tour at the same moment never print the same number: a job that would is
+ // refused as a whole (409) and prints correctly when tried again.
+ const stays=[];for(let n=0;n<4;n++)stays.push(await f.tour(3,{office:'',arrival:'2026-10-23'}));
+ const jobs=await Promise.all(stays.map(s=>f.call('/labels',{tourIds:[s.id],requestKey:randomUUID()})));
+ assert.ok(jobs.every(j=>[201,409].includes(j.status)),JSON.stringify(jobs.map(j=>j.status)));
+ for(const [n,job] of jobs.entries())if(job.status===409){assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').bind(stays[n].id).first()).n,0,'nothing from a refused job is kept');await f.issue(stays[n].id);}
+ const all=(await f.db.prepare("SELECT sticker_no FROM people WHERE sticker_tour='1' ORDER BY sticker_no").all()).results.map(r=>r.sticker_no);
+ assert.deepEqual(all,Array.from({length:15},(_,i)=>i+1),'every overlapping card has its own number');
+ // The database itself refuses a duplicate.
+ const spare=await f.tour(1,{office:'',arrival:'2026-10-23'});
+ await assert.rejects(f.db.prepare("INSERT INTO people(id,tour_id,person_no,sticker_no,sticker_tour) VALUES('rival',?,1,4,'1')").bind(spare.id).run(),/duplicate_sticker_no/);
+ ctx.diagnostic(JSON.stringify(jobs.map(j=>j.status)));
+ }finally{await f.close();}
+});
+
+test('Cloudflare: migration 0008 numbers people printed earlier without touching their stays',async()=>{
+ const f=await fixture({},MIGRATIONS.slice(0,7));try{
+ await f.db.batch([`INSERT INTO tours(id,tour_id,shared_tour_id,office,arrival,departure,pax,created_at) VALUES('sheet','26/5253',NULL,'A','2026-10-21','2026-10-24',2,'x'),('shared',NULL,'26/5253','A','2026-10-21','2026-10-24',1,'x'),('legacy','2938',NULL,'A','2026-10-21','2026-10-24',1,'x'),('named','MAIMOON TOUR',NULL,'A','2026-10-21','2026-10-24',1,'x'),('short','26/5',NULL,'A','2026-10-21','2026-10-24',1,'x')`,
+  `INSERT INTO people(id,tour_id,person_no) VALUES('s1','sheet',1),('s2','sheet',2),('x1','shared',1),('l1','legacy',1),('n1','named',1),('h1','short',1)`].map(sql=>f.db.prepare(sql)));
+ const before=(await f.db.prepare('SELECT * FROM tours ORDER BY id').all()).results;
+ await f.db.batch(statements('0008_card_numbers.sql').map(sql=>f.db.prepare(sql)));
+ assert.deepEqual((await f.db.prepare('SELECT id,sticker_no,sticker_tour FROM people ORDER BY id').all()).results,
+  [{id:'h1',sticker_no:1,sticker_tour:'5'},{id:'l1',sticker_no:1,sticker_tour:'2938'},{id:'n1',sticker_no:null,sticker_tour:null},{id:'s1',sticker_no:1,sticker_tour:'5253'},{id:'s2',sticker_no:2,sticker_tour:'5253'},{id:'x1',sticker_no:null,sticker_tour:null}]);
+ assert.deepEqual((await f.db.prepare('SELECT * FROM tours ORDER BY id').all()).results,before);
+ assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
  }finally{await f.close();}
 });

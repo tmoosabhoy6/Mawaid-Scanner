@@ -8,7 +8,8 @@ import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFF
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from './summary.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from './scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry } from './scan-query.js';
+import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from './sticker.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
@@ -132,6 +133,9 @@ export function createApp(options = {}) {
       for (let n = count + 1; n <= tour.pax && cards.length < 500; n++) cards.push({ ...tour, id: uid(), tour_key: id, person_id: uid(), person_no: n, token: token(), printed_at: stamp });
     }
     if (!cards.length) throw fail('All selected people already have cards. Print them again from Print log, or add a tour for new cards.');
+    // Card numbers continue after the highest already printed for the tour number in overlapping stays (see sticker.js).
+    const stays = [...new Map(cards.map(c => [c.tour_key, { id: c.tour_key, tour: stickerTour(c.tour_id) }])).values()];
+    assignStickers(cards, new Map(db.prepare(STICKER_BASE_SQL).all(JSON.stringify(stays)).map(r => [r.id, r.base])));
     const pdf = await (options.renderLabels || makeLabels)(cards, settings);
     const result = transaction(db, () => {
       const retry = db.prepare('SELECT id FROM batches WHERE request_key=?').get(req.body.requestKey); if (retry) return { id: retry.id, existing: true };
@@ -139,7 +143,7 @@ export function createApp(options = {}) {
       for (const c of cards) {
         const latest = db.prepare('SELECT pax FROM tours WHERE id=?').get(c.tour_key);
         if (!latest || c.person_no > latest.pax) throw fail('Tour changed while preparing labels. Refresh and try again.', 409);
-        db.prepare('INSERT INTO people VALUES(?,?,?)').run(c.person_id, c.tour_key, c.person_no);
+        db.prepare('INSERT INTO people(id,tour_id,person_no,sticker_no,sticker_tour) VALUES(?,?,?,?,?)').run(c.person_id, c.tour_key, c.person_no, c.sticker_no, c.sticker_tour);
         db.prepare('INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) VALUES(?,?,?,?,?)').run(c.id, c.person_id, batchId, hash(c.token), stamp);
       }
       const remaining = ids.reduce((sum,id)=>sum+Math.max(0,db.prepare('SELECT pax FROM tours WHERE id=?').get(id).pax-db.prepare('SELECT COUNT(*) AS n FROM people WHERE tour_id=?').get(id).n),0);
@@ -164,14 +168,15 @@ export function createApp(options = {}) {
     res.json(await offlineData(all, new URL(req.url, 'http://local'), { ...serviceAt(now()), serverTime: now().toISOString() }, 'hex'));
   });
   app.post('/api/scan', (req, res) => {
-    const { requestKey, code } = req.body;
+    const { requestKey } = req.body;
     if (typeof requestKey !== 'string' || !/^[\w-]{16,100}$/.test(requestKey)) throw fail('A scan request key is required.');
-    if (typeof code !== 'string' || code.length > 300) throw fail('Invalid QR code.');
+    const { code, typed } = scanEntry(req.body);
     // A scan made on an offline phone is checked as at the time it was made.
     const offlineAt = offlineTime(req.body, now()), at = offlineAt || now(), service = serviceAt(at), gate = scanGate(req.body);
-    const codeHash = code.startsWith('MW1:') ? hash(code.slice(4)) : '';
     const result = transaction(db, () => {
-      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), codeHash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate);
+      // A typed card number finds its card, which is then checked exactly like that card's QR (see sticker.js).
+      const found = typed ? typedCard(db.prepare(TYPED_SQL).all(...typedParams(typed)), service.date) : { hash: code.startsWith('MW1:') ? hash(code.slice(4)) : '', miss: null };
+      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), found.hash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate, typed, found.miss);
       return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
     const earlier = REPEAT_REASONS.includes(result.reason) ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;
@@ -269,7 +274,7 @@ export function createApp(options = {}) {
   app.get(['/', '/scanner'], (req, res) => res.sendFile(resolve('public/index.html')));
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    const conflict = /UNIQUE constraint/.test(err.message);
+    const conflict = /UNIQUE constraint|duplicate_sticker_no/.test(err.message);
     if ((!err.status || err.status >= 500) && !conflict) console.error('Request failed:', err.message);
     res.status(conflict ? 409 : (err.status || 500)).json({ error: conflict ? 'This record changed during printing. Refresh and open the print log before trying again.' : err.status ? err.message : 'The request could not be completed. Please try again.' });
   });

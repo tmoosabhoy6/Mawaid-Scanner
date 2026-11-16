@@ -1,5 +1,6 @@
 import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, tourIdSql, TIME_ZONE, START_DATE } from '../src/rules.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate } from '../src/scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry } from '../src/scan-query.js';
+import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from '../src/sticker.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
@@ -185,12 +186,15 @@ export async function handleRequest(request,env,clock=()=>new Date()){
 }
 async function scan(db,body,now){
  if(!keyValid(body.requestKey))throw fail('A scan request key is required.');
- if(typeof body.code!=='string'||body.code.length>300)throw fail('Invalid QR code.');
+ const {code,typed}=scanEntry(body);
  // A scan made on an offline phone is checked as at the time it was made.
  const offlineAt=offlineTime(body,now),at=offlineAt||now;
- const service=serviceAt(at),gate=scanGate(body),codeHash=body.code.startsWith('MW1:')?await hash(body.code.slice(4)):'';
+ const service=serviceAt(at),gate=scanGate(body);
+ // A typed card number finds its card, which is then checked exactly like that card's QR (see src/sticker.js).
+ // Card numbers are only ever added, never changed, so finding the card first cannot race the scan below.
+ const found=typed?typedCard(await all(db,TYPED_SQL,...typedParams(typed)),service.date):{hash:code.startsWith('MW1:')?await hash(code.slice(4)):'',miss:null};
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
- const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),codeHash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate);
+ const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),found.hash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate,typed,found.miss);
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
  const replayed=!row,earlier=REPEAT_REASONS.includes(result.reason)?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
  return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:GREEN_REASONS.includes(result.reason)&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});
@@ -217,12 +221,16 @@ async function issueLabels(db,body,env,stamp){
   for(let n=r.issued+1;n<=r.pax&&cards.length<MAX_LABELS;n++)cards.push({...r,id:crypto.randomUUID(),person_id:crypto.randomUUID(),person_no:n,token:randomToken(),printed_at:stamp});
  }
  if(!cards.length)throw fail('All selected people already have cards. Print them again from Print log, or add a tour for new cards.');
+ // Card numbers continue after the highest already printed for the tour number in overlapping stays (see src/sticker.js).
+ // Trigger validate_sticker_no refuses the whole job if another computer printed the same number meanwhile.
+ const stays=[...new Map(cards.map(c=>[c.tour_key,{id:c.tour_key,tour:stickerTour(c.tour_id)}])).values()];
+ assignStickers(cards,new Map((await all(db,STICKER_BASE_SQL,JSON.stringify(stays))).map(r=>[r.id,r.base])));
  remaining=Math.max(0,remaining-cards.length);
  const plan=await Promise.all(cards.map(async c=>({...c,token_hash:await hash(c.token)})));
  const id=crypto.randomUUID(),payload=JSON.stringify(plan.map(({token,...c})=>c));
  const envelope=await seal({cards,printer,count:cards.length},env.SYNC_TOKEN);
  const statements=[stmt(db,"INSERT INTO batches(id,created_at,kind,request_key,envelope,remaining) VALUES(?,?,'initial',?,?,?)",id,stamp,body.requestKey,envelope,remaining),
-  stmt(db,`INSERT INTO people(id,tour_id,person_no) SELECT json_extract(value,'$.person_id'),json_extract(value,'$.tour_key'),json_extract(value,'$.person_no') FROM json_each(?)`,payload),
+  stmt(db,`INSERT INTO people(id,tour_id,person_no,sticker_no,sticker_tour) SELECT json_extract(value,'$.person_id'),json_extract(value,'$.tour_key'),json_extract(value,'$.person_no'),json_extract(value,'$.sticker_no'),json_extract(value,'$.sticker_tour') FROM json_each(?)`,payload),
   stmt(db,`INSERT INTO cards(id,person_id,batch_id,token_hash,created_at) SELECT json_extract(value,'$.id'),json_extract(value,'$.person_id'),?,json_extract(value,'$.token_hash'),? FROM json_each(?)`,id,stamp,payload)];
  try{await db.batch(statements);}catch(error){const existing=await first(db,'SELECT id FROM batches WHERE request_key=?',body.requestKey);if(existing)return json({...await batchManifest(db,existing.id,env),existing:true});throw error;}
  return json({id,count:cards.length,remaining,cards,printer,requiresPdfUpload:true},201);
@@ -275,7 +283,7 @@ async function syncTours(db,body,stamp){
 export async function respond(request,env,clock){
  try{return headers(await handleRequest(request,env,clock));}
  catch(error){
-  const conflict=/UNIQUE constraint|invalid_person_capacity|overlapping_tour/.test(error.message);
+  const conflict=/UNIQUE constraint|invalid_person_capacity|overlapping_tour|duplicate_sticker_no/.test(error.message);
   const status=conflict?409:(error.status||500);
   if(status>=500)console.error(JSON.stringify({message:'request_failed',path:new URL(request.url).pathname,status}));
   const message=conflict?'This record changed or overlaps another stay. Refresh before trying again.':error.status?error.message:'The request could not be completed. Admission is blocked until the server is available.';

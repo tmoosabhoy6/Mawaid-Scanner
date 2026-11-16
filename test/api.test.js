@@ -23,7 +23,7 @@ test('50 unique cards; one admission per meal across concurrent scans',async()=>
  f.setTime('2026-10-22T04:00:00Z');assert.equal((await scan(f,cards[0].token)).body.status,'green');
  const pdf=await f.admin.get(`/api/batches/${batch.id}/pdf`).expect(200);
  assert.equal(pdf.headers['content-type'],'application/pdf');assert.ok(pdf.body.length>10000);
- if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/50-labels.pdf`,pdf.body);writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/expected.json`,JSON.stringify(cards.map(c=>`MW1:${c.token}`)));}
+ if(process.env.LABEL_TEST_OUTPUT){mkdirSync(process.env.LABEL_TEST_OUTPUT,{recursive:true});writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/50-labels.pdf`,pdf.body);writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/expected.json`,JSON.stringify(cards.map(c=>`MW1:${c.token}`)));writeFileSync(`${process.env.LABEL_TEST_OUTPUT}/numbers.json`,JSON.stringify(cards.map(c=>`${String(c.sticker_no).padStart(2,'0')}${c.sticker_tour}`)));}
  }finally{f.close();}
 });
 
