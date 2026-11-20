@@ -386,7 +386,7 @@ const OFFLINE_DATA_KEY='mawaidScannerData',OFFLINE_QUEUE_KEY='mawaidScanQueue',G
 const OFFLINE_VERSION=2;
 // The scanner has a Men's and a Women's tab. The phone remembers its tab, and every scan records it.
 let gate='men';
-let offlineData=null,scanQueue=[],connected=true,toursPolls=0,retryTimer=null;
+let offlineData=null,scanQueue=[],connected=true,retryTimer=null;
 // Green results; only 'admitted' records a meal. Breakfast lets every card in (see SCAN_SQL).
 const GREEN_REASONS=['admitted','breakfast_repeat','breakfast_unlisted'];
 const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Card not on this phone’s list',unknown_number:'No card on this phone’s list has this number. Check the number, or scan the QR code',ambiguous_number:'This number matches more than one guest. Scan the QR code',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',already_scanned:'Already admitted for this meal today'};
@@ -408,12 +408,10 @@ function applyOfflineData(data){
   for(const [hash,person,tour,no,revoked,stickerNo,stickerTour] of data.cards){
     if(!data.full)for(const old of Object.values(d.cards))if(old[0]===person)old[3]=1;
     d.cards[hash]=[person,tour,no,revoked,stickerNo??null,stickerTour??null];
-    if(!d.tours[tour])d.needTours=true;
   }
   if(d.servedDate!==data.date){d.served={};d.servedDate=data.date;}
   for(const [person,meal] of data.admissions||[])d.served[`${person}|${meal}`]??=1;
   Object.assign(d,{cardCursor:data.cardCursor,admissionCursor:data.admissionCursor,meals:data.meals,updatedAt:Date.now()});
-  if(data.tours)d.needTours=false;
   offlineData=d;store(OFFLINE_DATA_KEY,d);
 }
 async function timedFetch(path,options={}){
@@ -424,7 +422,8 @@ async function timedFetch(path,options={}){
 async function pollOfflineData(){
   const d=offlineData,params=new URLSearchParams();
   if(d?.cardCursor&&d.hash&&d.v===OFFLINE_VERSION){params.set('cards',d.cardCursor);params.set('admissions',d.admissionCursor||0);params.set('date',d.servedDate||'');}
-  if(!d?.cardCursor||d.needTours||++toursPolls%10===0)params.set('tours','1');
+  // Tour dates, PAX and removals come with every request, so a Sheet change reaches the phones within a minute.
+  params.set('tours','1');
   const response=await timedFetch(`/api/scanner/data?${params}`),data=await response.json();
   if(!response.ok)throw new Error(data.error||'Request failed.');
   applyOfflineData(data);return data;
@@ -526,7 +525,7 @@ async function scannerView(){
     if(!offlineData?.cardCursor&&!scannerBusy)showResult('red','Connection unavailable','This phone has no card list yet. Admission is blocked until the server is reachable.');else ready();
     clearTimeout(retryTimer);retryTimer=setTimeout(()=>void update(),15000);
   };
-  // One request a minute keeps the phone's card list current; it reads only what changed since the last one.
+  // One request a minute keeps the phone current: new and replaced cards, today's admissions and every current tour.
   const update=async()=>{
     if(document.hidden||currentView!=='scanner')return;
     try{await sendQueue();const next=await pollOfflineData();if(currentView!=='scanner')return;connected=true;clearTimeout(retryTimer);service=next;showLink();ready();}
