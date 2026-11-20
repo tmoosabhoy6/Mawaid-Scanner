@@ -29,7 +29,7 @@ function liveFilters(form, load) {
 const LOGO = '/brand/faiz-e-husaini-logo-white.webp';
 const brand = `<div class="brand"><img src="${LOGO}" alt="Faiz-e-Husaini Society (Iraq)" width="132" height="141"><strong>Mawaid</strong><span>Faiz-e-Husaini · Karbala</span></div>`;
 const ornament = `<svg class="ornament" viewBox="0 0 200 18" aria-hidden="true"><path d="M0 9h82M118 9h82" stroke="currentColor" stroke-width="1" opacity=".55"/><g fill="none" stroke="currentColor" stroke-width="1.3"><rect x="94" y="3" width="12" height="12"/><rect x="94" y="3" width="12" height="12" transform="rotate(45 100 9)"/></g></svg>`;
-async function stopScanner() { clearInterval(scannerTimer); scannerTimer = null; clearTimeout(retryTimer); if(scannerVisibility)document.removeEventListener('visibilitychange',scannerVisibility);scannerVisibility=null; if (camera) { try { await camera.stop(); } catch {} camera = null; } }
+async function stopScanner() { clearInterval(scannerTimer); scannerTimer = null; clearTimeout(retryTimer); if(scannerVisibility){document.removeEventListener('visibilitychange',scannerVisibility);window.removeEventListener('online',scannerVisibility);}scannerVisibility=null; if (camera) { try { await camera.stop(); } catch {} camera = null; } }
 function login() {
   // Only the administrator signs in; the scanner at /scanner opens without a password.
   stopScanner(); role = null;
@@ -382,17 +382,27 @@ function downloadZip(filename,entries){const url=URL.createObjectURL(zipBlob(ent
 /* Gate phones check cards online first. When the Wi-Fi drops they keep checking against a copy of the current
    cards held on the phone, and send those scans to the server once the connection returns. */
 const OFFLINE_DATA_KEY='mawaidScannerData',OFFLINE_QUEUE_KEY='mawaidScanQueue',GATE_KEY='mawaidScannerGate',ONLINE_TIMEOUT=3000;
+// A card check waits 3 s for the server. The background list download is larger, so a slow connection gets longer
+// before the phone treats itself as offline.
+const LIST_TIMEOUT=20000;
+// A printed card's QR: MW1: then 43 random characters. Only the server can tell which card it is.
+const CARD_CODE=/^MW1:[A-Za-z0-9_-]{43}$/;
 // The phone's card list format. A list saved by an older version has no card numbers, so it is downloaded again in full.
 const OFFLINE_VERSION=2;
 // The scanner has a Men's and a Women's tab. The phone remembers its tab, and every scan records it.
 let gate='men';
 let offlineData=null,scanQueue=[],connected=true,retryTimer=null;
 // Green results; only 'admitted' records a meal. Breakfast lets every card in (see SCAN_SQL).
-const GREEN_REASONS=['admitted','breakfast_repeat','breakfast_unlisted'];
-const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Card not on this phone’s list',unknown_number:'No card on this phone’s list has this number. Check the number, or scan the QR code',ambiguous_number:'This number matches more than one guest. Scan the QR code',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',already_scanned:'Already admitted for this meal today'};
+// offline_unlisted: a printed card that is newer than the phone's list. The phone cannot check it, so the guest is let in
+// and the server checks the card when the scan is sent; the scan log then shows the real result.
+const GREEN_REASONS=['admitted','breakfast_repeat','breakfast_unlisted','offline_unlisted'];
+const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Not a meal card',offline_unlisted:'Welcome — a new card this phone cannot check yet. It is checked when the connection returns',unknown_number:'No card on this phone’s list has this number. Check the number, or scan the QR code',ambiguous_number:'This number matches more than one guest. Scan the QR code',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',already_scanned:'Already admitted for this meal today'};
 function readStored(key,fallback){try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return fallback;}}
 function store(key,value){try{localStorage.setItem(key,JSON.stringify(value));}catch{}}
 const clock12=v=>new Intl.DateTimeFormat('en-GB',{hour:'numeric',minute:'2-digit',hour12:true,timeZone:TIME_ZONE}).format(new Date(v));
+// When the phone's card list was last updated: the time today, or the date and time for an older list.
+const listTime=v=>{if(!v)return 'never';const day=x=>new Intl.DateTimeFormat('en-CA',{timeZone:TIME_ZONE}).format(new Date(x));
+  return day(v)===day(new Date())?clock12(v):`${new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',timeZone:TIME_ZONE}).format(new Date(v))}, ${clock12(v)}`;};
 function karbalaService(now,meals){
   const p=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(now).map(x=>[x.type,x.value]));
   const minutes=+p.hour*60+ +p.minute,meal=(meals||[]).find(m=>minutes>=m.start&&minutes<m.end);
@@ -411,11 +421,11 @@ function applyOfflineData(data){
   }
   if(d.servedDate!==data.date){d.served={};d.servedDate=data.date;}
   for(const [person,meal] of data.admissions||[])d.served[`${person}|${meal}`]??=1;
-  Object.assign(d,{cardCursor:data.cardCursor,admissionCursor:data.admissionCursor,meals:data.meals,updatedAt:Date.now()});
+  Object.assign(d,{cardCursor:data.cardCursor,admissionCursor:data.admissionCursor,meals:data.meals,updatedAt:+new Date()});
   offlineData=d;store(OFFLINE_DATA_KEY,d);
 }
-async function timedFetch(path,options={}){
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),ONLINE_TIMEOUT);
+async function timedFetch(path,options={},timeout=ONLINE_TIMEOUT){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);
   try{const response=await fetch(path,{...options,signal:controller.signal});if(response.status>=500)throw new Error('Server unavailable');return response;}
   finally{clearTimeout(timer);}
 }
@@ -424,7 +434,7 @@ async function pollOfflineData(){
   if(d?.cardCursor&&d.hash&&d.v===OFFLINE_VERSION){params.set('cards',d.cardCursor);params.set('admissions',d.admissionCursor||0);params.set('date',d.servedDate||'');}
   // Tour dates, PAX and removals come with every request, so a Sheet change reaches the phones within a minute.
   params.set('tours','1');
-  const response=await timedFetch(`/api/scanner/data?${params}`),data=await response.json();
+  const response=await timedFetch(`/api/scanner/data?${params}`,{},LIST_TIMEOUT),data=await response.json();
   if(!response.ok)throw new Error(data.error||'Request failed.');
   applyOfflineData(data);return data;
 }
@@ -461,7 +471,13 @@ async function checkOffline(entry,now){
   const reason=await(async()=>{
     const breakfast=service.meal==='breakfast',found=entry.number?typedOffline(d,entry.number,service.date):{card:entry.code.startsWith('MW1:')&&d.cards[await sha256(entry.code.slice(4),d.hash)]};
     const card=found.card,tour=card&&d.tours[card[1]];
-    if(!card||!tour)return breakfast?'breakfast_unlisted':found.reason||'unknown_card';
+    if(!card||!tour){
+      if(breakfast)return 'breakfast_unlisted';
+      // A real card missing from the list was printed after the phone's last update: never turn that guest away.
+      if(!card&&!entry.number&&CARD_CODE.test(entry.code))return 'offline_unlisted';
+      // The list holds every stay that has not ended, so a known card without its stay has left.
+      return card?'after_departure':found.reason||'unknown_card';
+    }
     const [person,,no,revoked]=card,[arrival,departure,pax,active]=tour,served=d.servedDate===service.date&&d.served[`${person}|${service.meal}`];
     Object.assign(result,{person_id:person,person_no:no});
     if(typeof served==='string')result.firstScannedAt=served;
@@ -480,7 +496,10 @@ function recordServed(result,at){
   d.served[`${result.person_id}|${result.meal}`]=at;store(OFFLINE_DATA_KEY,d);
 }
 // Offline scans are sent in order; one that the server refuses outright is dropped so it cannot block the rest.
-async function sendQueue(){
+// Only one sender runs at a time, so a long backlog is never sent twice.
+let sendingQueue=null;
+function sendQueue(){return sendingQueue??=sendQueued().finally(()=>{sendingQueue=null;});}
+async function sendQueued(){
   while(scanQueue.length){
     const item=scanQueue[0],response=await timedFetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...(item.number?{number:item.number}:{code:item.code}),requestKey:item.requestKey,offlineAt:item.at,offlineStatus:item.status,gate:item.gate})});
     if(!response.ok&&response.status!==400)throw new Error('Not sent');
@@ -514,7 +533,7 @@ async function scannerView(){
     seenCards.set(code,now);if(code===lastCode){lastAt=now;readyLater();}return true;
   };
   const showLink=()=>{
-    const cards=offlineData?Object.keys(offlineData.cards).length:0,list=offlineData?.updatedAt?` · ${number(cards)} cards on this phone, updated ${clock12(offlineData.updatedAt)}`:'',waiting=scanQueue.length?` · ${number(scanQueue.length)} offline scan${scanQueue.length===1?'':'s'} waiting to send`:'';
+    const cards=offlineData?Object.keys(offlineData.cards).length:0,list=offlineData?.updatedAt?` · ${number(cards)} cards on this phone, updated ${listTime(offlineData.updatedAt)}`:'',waiting=scanQueue.length?` · ${number(scanQueue.length)} offline scan${scanQueue.length===1?'':'s'} waiting to send`:'';
     $('#linkChip').textContent=connected?'Online':'Offline';$('#linkChip').className=`link-chip ${connected?'online':'offline'}`;
     $('#scannerStatus').textContent=`${service?.date||today()} · Karbala · ${connected?'Device connected':'No connection: cards are checked on this phone'}${list}${waiting}`;
   };
@@ -526,10 +545,14 @@ async function scannerView(){
     clearTimeout(retryTimer);retryTimer=setTimeout(()=>void update(),15000);
   };
   // One request a minute keeps the phone current: new and replaced cards, today's admissions and every current tour.
+  // The list is brought up to date first, then any scans made offline are sent, so a long backlog never leaves
+  // the phone checking cards against an old list.
   const update=async()=>{
     if(document.hidden||currentView!=='scanner')return;
-    try{await sendQueue();const next=await pollOfflineData();if(currentView!=='scanner')return;connected=true;clearTimeout(retryTimer);service=next;showLink();ready();}
-    catch{if(currentView==='scanner')goOffline();}
+    try{
+      const next=await pollOfflineData();if(currentView!=='scanner')return;connected=true;clearTimeout(retryTimer);service=next;showLink();ready();
+      if(scanQueue.length){await sendQueue();if(currentView==='scanner')showLink();}
+    }catch{if(currentView==='scanner')goOffline();}
   };
   const cameraButton=()=>{$('#startCamera').textContent=camera?'Stop camera':'Start camera';$('#startCamera').classList.toggle('primary',!camera);};
   async function stopScannerCamera(){if(camera){const running=camera;camera=null;try{await running.stop();}catch{}try{running.clear();}catch{}}cameraButton();}
@@ -561,7 +584,7 @@ async function scannerView(){
     // The wait for the same card starts again once its result is on screen, however long the check took.
     lastAt=Date.now();if(fromCamera&&lastCode===code)seenCards.set(code,lastAt);
     const duplicate=result.reason==='already_scanned',title=result.status==='green'?'ALLOW':duplicate?'ALREADY SCANNED':'DO NOT ADMIT';
-    const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}${sinceText(result.firstScannedAt,result.serverTime)}`:''),typed?`No. ${code}`:result.person_no?`Person ${result.person_no}`:'',result.offline?'Checked offline':''].filter(Boolean).join(' · ');
+    const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}${sinceText(result.firstScannedAt,result.serverTime)}`:''),typed?`No. ${code}`:result.person_no?`Person ${result.person_no}`:'',result.offline?`Checked offline · card list from ${listTime(offlineData?.updatedAt)}`:''].filter(Boolean).join(' · ');
     showResult(result.status==='green'?'green':'red',title,detail);flash(result.status==='green',title,detail);
     beep(result.status==='green',duplicate);
     // After green the next card can be scanned as soon as the flash clears; the same card stays ignored while in view.
@@ -589,9 +612,9 @@ async function scannerView(){
     submit(typedDigits(value),false,true);
   };
   await update();
-  // Hidden phones make no periodic requests.
+  // Hidden phones make no periodic requests. A phone whose connection returns updates straight away.
   scannerVisibility=()=>{if(!document.hidden)void update();};
-  document.addEventListener('visibilitychange',scannerVisibility);
+  document.addEventListener('visibilitychange',scannerVisibility);window.addEventListener('online',scannerVisibility);
   scannerTimer=setInterval(update,60000);
 }
 function showResult(color,title,detail){const box=$('#scanResult');if(!box)return;box.className=`scan-result ${color}`;box.innerHTML=`<strong>${e(title)}</strong><small>${e(detail)}</small>`;}

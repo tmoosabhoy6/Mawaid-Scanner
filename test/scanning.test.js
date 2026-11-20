@@ -51,6 +51,8 @@ test('offline scans are checked at the time they were made; a phone that showed 
 test('gate phones download current cards once, then only what changed',async()=>{
  const f=await fixture();try{
  const t=await tour(f,2),{cards}=await issue(f,t.id),hex=v=>createHash('sha256').update(v).digest('hex');
+ // A stay with no cards printed yet cannot be scanned, so it is left out of the phone's list.
+ await tour(f,3,{tour_id:'26/3389',office:'FH America'});
  const full=(await f.scanner.get('/api/scanner/data').expect(200)).body;
  assert.equal(full.full,true);assert.equal(full.hash,'hex');assert.equal(full.meal,'breakfast');
  assert.deepEqual(full.cards.map(c=>c[0]).sort(),cards.map(c=>hex(c.token)).sort());

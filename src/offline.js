@@ -1,14 +1,16 @@
 // Gate phones keep a copy of the cards of current stays, so they can keep checking cards when the Wi-Fi drops.
 // The first download holds every current card and today's meals; after that each minute's poll reads only
 // cards and meals added since the phone's cursors. A person whose card was replaced (in the past) has a newer card,
-// so a phone that receives a person's new card treats that person's older cards as replaced. Tours are small and
-// are re-read every few minutes. Only random card hashes, dates, person numbers and the card numbers printed under
-// the QR (so a number typed at the gate can be checked offline too) are sent — no names or offices.
+// so a phone that receives a person's new card treats that person's older cards as replaced. Every poll also carries
+// the current stays that have cards (dates, PAX, active), so Sheet changes reach the phones within a minute; stays
+// with no cards cannot be scanned and are left out to keep the poll small. Only random card hashes, dates, person
+// numbers and the card numbers printed under the QR (so a number typed at the gate can be checked offline too) are
+// sent — no names or offices.
 const CURRENT_TOURS = 'SELECT id FROM tours WHERE departure>=?1';
 export const OFFLINE_SQL = {
   cardCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM cards',
   admissionCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM admissions',
-  tours: `SELECT t.id,t.arrival,t.departure,t.pax,t.active FROM tours t WHERE t.id IN (${CURRENT_TOURS})`,
+  tours: 'SELECT t.id,t.arrival,t.departure,t.pax,t.active FROM tours t WHERE t.departure>=?1 AND EXISTS(SELECT 1 FROM people p WHERE p.tour_id=t.id)',
   allCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour
     FROM people p JOIN cards c ON c.person_id=p.id WHERE p.tour_id IN (${CURRENT_TOURS}) AND c.rowid<=?2`,
   newCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour

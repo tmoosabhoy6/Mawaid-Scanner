@@ -455,7 +455,7 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  await waitFor(()=>d.querySelector('#scanResult strong').textContent==='ALREADY SCANNED');
  assert.equal(d.querySelector('#flash').className,'flash red');assert.match(d.querySelector('#scanResult').textContent,/at 7:22 pm/);
  await new Promise(r=>setTimeout(r,1400));send('MW1:unknown');
- await waitFor(()=>/not on this phone/.test(d.querySelector('#scanResult').textContent));
+ await waitFor(()=>/Not a meal card/.test(d.querySelector('#scanResult').textContent));assert.equal(d.querySelector('#scanResult').className,'scan-result red');
  assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,4);
  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scan_logs').get().n,0);
  // Back online: the next status check sends the queued scans, oldest first.
@@ -467,6 +467,39 @@ test('scanner keeps checking cards offline with a full-screen result, then sends
  // Online again, a duplicate is still caught by the server.
  await new Promise(r=>setTimeout(r,1400));send(`MW1:${cards[0].token}`);
  await waitFor(()=>/Already admitted/.test(d.querySelector('#scanResult').textContent)&&!/offline/.test(d.querySelector('#scanResult').textContent));
+ }finally{dom?.window.close();f.close();}
+});
+
+test('an offline phone lets in a card printed after its last update, and the server checks it once back online',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2);await issue(f,t.id);f.setTime('2026-10-21T16:22:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ assert.match(d.querySelector('#scannerStatus').textContent,/2 cards on this phone, updated 7:22 pm/);
+ // The phone loses its connection; meanwhile a new arrival's cards are printed.
+ offline=true;
+ const late=await tour(f,2,{tour_id:'26/3389',office:'FH America'}),{cards:lateCards}=await issue(f,late.id);
+ const form=d.querySelector('#manualScan'),input=d.querySelector('#manualCode'),send=code=>{input.value=code;submit(w,form);};
+ const shown=()=>d.querySelector('#scanResult');
+ send(`MW1:${lateCards[0].token}`);
+ await waitFor(()=>shown().classList.contains('green'));
+ assert.match(shown().textContent,/ALLOW/);assert.match(shown().textContent,/cannot check yet/);
+ assert.match(shown().textContent,/Checked offline · card list from 7:22 pm/);
+ // A code that is not a printed card is still turned away.
+ await new Promise(r=>setTimeout(r,1000));send('MW1:not-a-card');
+ await waitFor(()=>shown().classList.contains('red'));assert.match(shown().textContent,/DO NOT ADMIT.*Not a meal card/);
+ // A list from an earlier day shows its date, so staff can see it is out of date.
+ f.setTime('2026-10-22T09:30:00Z');d.dispatchEvent(new w.Event('visibilitychange'));
+ await new Promise(r=>setTimeout(r,1400));send(`MW1:${lateCards[1].token}`);
+ await waitFor(()=>/card list from 21 Oct, 7:22 pm/.test(shown().textContent));
+ // Back online: the list is brought up to date and the scans are sent and checked by the server.
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0&&d.querySelector('#linkChip').textContent==='Online');
+ assert.deepEqual(f.db.prepare('SELECT date,meal,reason,offline FROM scan_logs ORDER BY id').all().map(r=>[r.date,r.meal,r.reason,r.offline]),
+  [['2026-10-21','dinner','admitted',1],['2026-10-21','dinner','unknown_card',1],['2026-10-22','lunch','admitted',1]]);
+ assert.match(d.querySelector('#scannerStatus').textContent,/4 cards on this phone, updated 12:30 pm/);
  }finally{dom?.window.close();f.close();}
 });
 
