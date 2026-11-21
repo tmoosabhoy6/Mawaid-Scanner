@@ -543,7 +543,8 @@ test('Cloudflare: a tour arriving in Karbala at night, on the next day\'s Pehli,
  const stay=(await f.call('/tours?date=')).data.find(t=>t.tour_id==='26/2291');assert.equal(stay.arrival,'2026-11-21');
  const cards=(await f.issue(stay.id)).cards;
  f.setTime('2026-11-20T17:00:00Z');assert.equal((await f.scan(cards[0].token)).data.reason,'before_arrival');
- // The ten-minute job reads NKERP and asks the Sheet to sync again.
+ // The ten-minute job reads NKERP, moves the stay to its arrival day at once (even if the Sheet is not syncing), and asks
+ // the Sheet to sync again.
  const worker=await f.mf.getWorker();
  await worker.scheduled({scheduledTime:new Date('2026-11-20T17:00:00Z'),cron:'*/10 * * * *'});
  const stored=JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='nkerp'").first()).value);
@@ -551,11 +552,12 @@ test('Cloudflare: a tour arriving in Karbala at night, on the next day\'s Pehli,
  assert.equal(JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='syncRequestedAt'").first()).value),'2026-11-20T17:00:00.000Z');
  assert.ok(seen.some(p=>p.endsWith('/api/accounts/Login')));
  const sealed=(await f.db.prepare("SELECT value FROM settings WHERE key='nkerpSession'").first()).value;assert.equal(sealed.includes('abc'),false);
- // The Sheet's next sync starts the stay on the arrival day; the printed card now works at that night's dinner.
- assert.equal((await sync([pehli])).data.changedTours,1);
+ assert.deepEqual((await f.call('/settings')).data.nkerpMoved.stays,['26/2291 arrived 2026-11-20 20:45; moved from 2026-11-21 to 2026-11-20']);
+ assert.equal((await f.scan(cards[0].token)).data.status,'green');
+ // The Sheet's next sync agrees: same stay, same cards, nothing to change.
+ assert.equal((await sync([pehli])).data.changedTours,0);
  const moved=(await f.call('/tours?date=')).data.filter(t=>t.tour_id==='26/2291');
  assert.deepEqual(moved.map(t=>[t.id,t.arrival,t.departure,t.pax]),[[stay.id,'2026-11-20','2026-11-25',2]]);
- assert.equal((await f.scan(cards[0].token)).data.status,'green');
  assert.equal((await f.scan(cards[1].token)).data.reason,'admitted');
  const settings=(await f.call('/settings')).data;
  assert.deepEqual(settings.sync.corrected,['26/2291 arrived 2026-11-20 20:45; Sheet Pehli 2026-11-21']);
@@ -566,6 +568,12 @@ test('Cloudflare: a tour arriving in Karbala at night, on the next day\'s Pehli,
  assert.equal(seen.filter(p=>p.endsWith('/api/accounts/Login')).length,logins);
  assert.equal(JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='syncRequestedAt'").first()).value),'2026-11-20T17:00:00.000Z');
  assert.equal((await sync([pehli])).data.changedTours,0);
+ // A stay that would overlap another stay of the same tour ID is not moved by the job.
+ await f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,source_key,created_at,active) VALUES('prev','26/4000','X','2026-11-15','2026-11-20',1,'sheets','k1','2026-11-01',1),('next','26/4000','X','2026-11-21','2026-11-25',1,'sheets',?,'2026-11-01',1)").bind(`${source.spreadsheetId}|Tours|26/4000|2026-11-21`).run();
+ visit.Tour.ReferenceNo='NKERP/TOUR/2026/4000';
+ await worker.scheduled({scheduledTime:new Date('2026-11-20T17:15:00Z'),cron:'*/10 * * * *'});
+ assert.equal((await f.db.prepare("SELECT arrival FROM tours WHERE id='next'").first()).arrival,'2026-11-21');
+ assert.equal((await f.db.prepare("SELECT value FROM settings WHERE key='nkerpError'").first()),null);
  // A tour with no cards printed also starts on the arrival day, under the Sheet's source key.
  visit.Tour.ReferenceNo='NKERP/TOUR/2026/3545';visit.ArrivalDate='2026-11-20T21:05:00';
  await worker.scheduled({scheduledTime:new Date('2026-11-20T17:20:00Z'),cron:'*/10 * * * *'});

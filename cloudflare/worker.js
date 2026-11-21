@@ -4,7 +4,7 @@ import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, st
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
-import { nkerpArrivals, readVisits } from '../src/nkerp.js';
+import { nkerpArrivals, readVisits, storedMoves } from '../src/nkerp.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
@@ -162,7 +162,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/settings'&&method==='GET'){
-  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),nkerp:await nkerpStatus(db,env),nkerpError:await getSetting(db,'nkerpError',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
+  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),nkerp:await nkerpStatus(db,env),nkerpError:await getSetting(db,'nkerpError',null),nkerpMoved:await getSetting(db,'nkerpMoved',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }
  if(path==='/api/settings'&&method==='POST'){
   const body=await boundedBody(request,8192),statements=[];
@@ -309,9 +309,15 @@ export async function refreshNkerp(env,now=new Date(),fetcher=fetch){
  try{
   const read=await readVisits({loginId:env.NKERP_LOGIN_ID,password:env.NKERP_PASSWORD,session,today:serviceAt(now).date,fetcher});
   const previous=await getSetting(db,'nkerp',null),changed=JSON.stringify(previous?.visits||[])!==JSON.stringify(read.visits);
-  await db.batch([settingStmt(db,'nkerp',{checkedAt:stamp,from:read.from,to:read.to,visits:read.visits}),settingStmt(db,'nkerpSession',await seal(read.session,env.SYNC_TOKEN)),
-   stmt(db,"DELETE FROM settings WHERE key='nkerpError'"),...(changed?[settingStmt(db,'syncRequestedAt',stamp)]:[])]);
-  return{visits:read.visits.length,changed};
+  // Current Sheet stays move to their arrival day straight away, so a stalled Sheet sync cannot hold the fix up.
+  // The guard mirrors the overlap triggers, so a stay that would overlap another of its tour ID is left as it is.
+  const today=serviceAt(now).date,moves=storedMoves(await all(db,"SELECT id,tour_id,arrival,departure,source_key FROM tours WHERE source='sheets' AND active=1 AND departure>=? AND tour_id IS NOT NULL",today),read.visits);
+  const results=await db.batch([settingStmt(db,'nkerp',{checkedAt:stamp,from:read.from,to:read.to,visits:read.visits}),settingStmt(db,'nkerpSession',await seal(read.session,env.SYNC_TOKEN)),
+   stmt(db,"DELETE FROM settings WHERE key='nkerpError'"),...(changed?[settingStmt(db,'syncRequestedAt',stamp)]:[]),
+   ...moves.map(m=>stmt(db,'UPDATE tours SET arrival=?1 WHERE id=?2 AND arrival=?3 AND NOT EXISTS(SELECT 1 FROM tours o WHERE o.id<>tours.id AND o.tour_id=tours.tour_id AND o.arrival<>?1 AND o.arrival<=tours.departure AND o.departure>=?1)',m.to,m.id,m.from))]);
+  const moved=moves.filter((m,i)=>results[results.length-moves.length+i].meta?.changes);
+  if(moved.length)await settingStmt(db,'nkerpMoved',{at:stamp,stays:moved.map(m=>`${m.tour_id} arrived ${m.arrived.replace('T',' ')}; moved from ${m.from} to ${m.to}`)}).run();
+  return{visits:read.visits.length,changed,moved:moved.length};
  }catch(error){
   console.error(JSON.stringify({message:'nkerp_refresh_failed',error:String(error.message).slice(0,200)}));
   await db.batch([settingStmt(db,'nkerpError',{at:stamp,message:String(error.message).slice(0,300)}),stmt(db,"DELETE FROM settings WHERE key='nkerpSession'")]).catch(()=>{});

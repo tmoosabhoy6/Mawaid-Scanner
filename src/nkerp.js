@@ -114,3 +114,14 @@ export async function readVisits({ loginId, password, session = null, today, fet
   if (session) { try { return await attempt(session); } catch { /* expired or refused: sign in again below */ } }
   return attempt(null);
 }
+
+// Stored Sheet stays to move to their NKERP arrival day now, without waiting for the Sheet's next sync (which can be
+// held up, for example by a row the Apps Script refuses). Each stored Sheet stay keeps the Sheet's own arrival (Pehli)
+// as the last part of its source key, so the same rule as the sync is applied to it. Only moves earlier; the Sheet sync
+// moves a stay back if NKERP changes. Rows: id, tour_id, arrival, departure, source_key of active Sheet stays.
+export function storedMoves(rows, visits) {
+  const stays = rows.map(r => ({ id: r.id, tour_id: r.tour_id, current: r.arrival, departure: r.departure, arrival: String(r.source_key || '').split('|').pop() }))
+    .filter(s => /^\d{4}-\d{2}-\d{2}$/.test(s.arrival) && s.arrival <= s.departure);
+  return nkerpArrivals(stays, visits).filter(s => s.sheet_arrival && s.arrival < s.current)
+    .map(s => ({ id: s.id, tour_id: s.tour_id, from: s.current, to: s.arrival, arrived: s.arrived }));
+}

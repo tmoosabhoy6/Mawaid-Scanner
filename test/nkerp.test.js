@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { visitsFromRows, nkerpArrivals, readVisits, addDays, VISIT_LISTS } from '../src/nkerp.js';
+import { visitsFromRows, nkerpArrivals, readVisits, addDays, VISIT_LISTS, storedMoves } from '../src/nkerp.js';
 
 // Rows shaped like NKERP's Karbala visit lists (live examples from November 2026, trimmed).
 export const row = (ref, arrival, departure, extra = {}) => ({ Id: Math.floor(Math.random() * 1e9), TourId: Number(ref.split('/').pop()) + 428000000,
@@ -92,4 +92,15 @@ test('readVisits refuses an incomplete census instead of storing part of the vis
     return Response.json({ lstMufiquaFinalInZSDTO: [], TotalRows: 3 });
   };
   await assert.rejects(readVisits({ loginId: 'id', password: 'pw', today: '2026-11-21', fetcher: short }), /part-way/);
+});
+
+test('storedMoves uses the Sheet arrival kept in each stay\'s source key and only moves stays earlier', () => {
+  const key = arrival => `sheet|Tours|26/2291|${arrival}`;
+  const visits = [['26/2291', '2026-11-20T20:45', '2026-11-25'], ['26/3545', '2026-11-20T21:05', '2026-11-25']];
+  const rows = [{ id: 'a', tour_id: '26/2291', arrival: '2026-11-21', departure: '2026-11-25', source_key: key('2026-11-21') },
+    { id: 'b', tour_id: '26/3545', arrival: '2026-11-20', departure: '2026-11-25', source_key: 'sheet|Tours|26/3545|2026-11-21' }, // already moved
+    { id: 'c', tour_id: '26/3545', arrival: '2026-11-18', departure: '2026-11-19', source_key: 'manual' }]; // no Sheet arrival
+  assert.deepEqual(storedMoves(rows, visits), [{ id: 'a', tour_id: '26/2291', from: '2026-11-21', to: '2026-11-20', arrived: '2026-11-20T20:45' }]);
+  // A stay with printed cards already widened before its arrival keeps its earlier day.
+  assert.deepEqual(storedMoves([{ ...rows[0], arrival: '2026-11-19' }], visits), []);
 });

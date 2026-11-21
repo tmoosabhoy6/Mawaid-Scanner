@@ -12,10 +12,15 @@ test('merged source columns, active stays across cutoff, same-day stays, repeate
  const result=parse([headers(),day('Tuesday, October 20, 2026'),row({arrival:true}),day('Wednesday, October 21, 2026'),row({departure:true}),row({arrival:true,departure:true,id:'26/2'}),day('Friday, October 23, 2026'),row({arrival:true}),day('Saturday, October 24, 2026'),row({departure:true})]);
  assert.equal(result.tours.length,3);assert.equal(result.tours[0].arrival,'2026-10-20');assert.equal(result.tours[0].departure,'2026-10-22');assert.equal(result.tours[1].departure,'2026-10-22');assert.equal(result.tours[2].departure,'2026-10-25');assert.equal(result.warnings.length,0);
 });
-test('missing or ambiguous departures and mismatched PAX excluded; invalid source aborts',()=>{
+test('missing or ambiguous departures and mismatched PAX excluded; a row without office or PAX leaves out only its tour',()=>{
  const result=parse([headers(),day('Wednesday, October 21, 2026'),row({arrival:true}),row({arrival:true,id:'26/2'}),day('Thursday, October 22, 2026'),row({departure:true,id:'26/2',pax:6})]);
  assert.equal(result.tours.length,0);assert.equal(result.warnings.length,2);
- assert.throws(()=>parse([headers(),day('Wednesday, October 21, 2026'),row({arrival:true,pax:'bad'})]),/PAX/);
+ // One row with no office (26/3554 in KRB - 25 on 21 November 2026 held the whole Sheet back for a day) or a bad PAX
+ // leaves out that tour with a warning the app recognises; every other tour still syncs.
+ const partial=parse([headers(),day('Wednesday, October 21, 2026'),row({arrival:true,pax:'bad'}),row({arrival:true,id:'26/3554',office:''}),row({arrival:true,id:'26/7'}),
+  day('Thursday, October 22, 2026'),row({departure:true}),row({departure:true,id:'26/3554'}),row({departure:true,id:'26/7'})]);
+ assert.deepEqual(partial.tours.map(t=>t.tour_id),['26/7']);
+ assert.deepEqual(partial.warnings,['26/1: source row 3 has no valid PAX; excluded until it is fixed.','26/3554: source row 4 has no office; excluded until it is fixed.']);
  assert.throws(()=>parse([day('Wednesday, October 21, 2026'),row({arrival:true})]),/headers/);
 });
 test('duplicates coalesce; conflicting duplicates abort; old stays omitted',()=>{
@@ -32,7 +37,7 @@ test('historical conflicts and invalid rows do not block a later valid visit by 
 test('conflicting arrivals before cutoff still block if their actual departure reaches launch',()=>{
  assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),/Conflicting.*rows 3 and 4/);
  assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7}),row({departure:true,pax:9})]),/Conflicting/);
- assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:'bad'}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),/Invalid office\/PAX/);
+ assert.deepEqual(parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:'bad'}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]).warnings,['26/1: source row 3 has no valid PAX; excluded until it is fixed.']);
 });
 test('calendar parser rejects impossible dates and source globals are isolated',()=>{
  assert.equal(context.MAWAYID_date('Wednesday, February 30, 2026'),null);

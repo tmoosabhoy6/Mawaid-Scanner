@@ -123,11 +123,13 @@ function MAWAYID_buildTours(data, config, firstRow) {
       if(!/^(?:\d{2}\/\d{1,5}|\d{4})$/.test(id))return;
       var pax=Number(String(row[c+3]||'').replace(/,/g,''));
       var office=String(row[c+1]||'').trim();
-      var issue = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? 'Invalid office/PAX in source row '+(offset+index+1)+'. Tours was not updated.' : null;
+      // A row with no office or no valid PAX leaves out only its own tour, with a warning naming the row; the app keeps
+      // that tour's last synced details (and its printed cards) until the row is fixed. It used to stop the whole sync.
+      var invalid = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? id+': source row '+(offset+index+1)+' has '+(!office?'no office':'no valid PAX')+'; excluded until it is fixed.' : null;
       if(!groups[id])groups[id]={arrivals:[],departures:[]};
       var events=groups[id][pair[1]], prior=events.filter(function(v){return v.date===date;})[0];
       if(prior && (prior.pax!==pax || prior.office!==office))prior.issue='Conflicting duplicate '+id+' on '+date+' (rows '+prior.row+' and '+(offset+index+1)+'). Tours was not updated.';
-      if(!prior)events.push({date:date,office:office,pax:pax,row:offset+index+1,issue:issue});
+      if(!prior)events.push({date:date,office:office,pax:pax,row:offset+index+1,issue:null,invalid:invalid});
     });
   });
   if(!sawArrivalHeader||!sawDepartureHeader)throw new Error('Source columns do not match the arrival/departure headers; refusing to change Tours.');
@@ -143,6 +145,8 @@ function MAWAYID_buildTours(data, config, firstRow) {
       if(!relevant)return;
       if(arrival.issue)throw new Error(arrival.issue);
       departures.forEach(function(d){if(d.issue)throw new Error(d.issue);});
+      var invalid=[arrival].concat(departures).filter(function(e){return e.invalid;})[0];
+      if(invalid){warnings.push(invalid.invalid);return;}
       if(departures.length!==1){if(arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;}))warnings.push(id+' ('+arrival.date+'): needs exactly one Wada date before the next arrival; excluded.');return;}
       var departure=departures[0];if(MAWAYID_nextDay(departure.date)<config.cutoff)return;
       if(next && MAWAYID_nextDay(departure.date)>=next.date){warnings.push(id+': departure (Wada + 1 day) overlaps the next arrival; excluded.');return;}
