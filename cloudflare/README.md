@@ -49,7 +49,14 @@ ADMIN_PASSWORD=YOUR_RANDOM_ADMIN_PASSWORD_AT_LEAST_12_CHARACTERS
 SYNC_TOKEN=YOUR_SEPARATE_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS
 ```
 
-Keep a private copy in your password manager. The sync token also encrypts unfinished label manifests; finish pending PDFs before rotating it. Upload the secrets with the deployment:
+To use each tour's actual Karbala arrival day from NKERP (see the main README), also add the NKERP account the Karbala Ziyarat work uses, as two more secrets:
+
+```dotenv
+NKERP_LOGIN_ID=YOUR_NKERP_LOGIN_ID
+NKERP_PASSWORD=YOUR_NKERP_PASSWORD
+```
+
+Keep a private copy in your password manager. The sync token also encrypts unfinished label manifests and the kept NKERP session; finish pending PDFs before rotating it. Upload the secrets with the deployment:
 
 ```sh
 npm run build:cloudflare
@@ -69,7 +76,7 @@ Install the Zebra ZD220D driver and QZ Tray on the printing computer. Confirm th
 
 ## Tours sync
 
-Follow the [separate ToursSync setup](../README.md#separate-tours-sync--preserve-the-existing-flatten-automation), using the deployed HTTPS origin and this deployment's `SYNC_TOKEN`. That setup adds its own function and trigger and leaves the existing flatten script and trigger untouched. Pehli Ziyarat is arrival; actual departure is Wada plus one calendar day.
+Follow the [separate ToursSync setup](../README.md#separate-tours-sync--preserve-the-existing-flatten-automation), using the deployed HTTPS origin and this deployment's `SYNC_TOKEN`. That setup adds its own function and trigger and leaves the existing flatten script and trigger untouched. Pehli Ziyarat is arrival, unless NKERP shows the tour reaching Karbala a day or two earlier (a 10-minute cron trigger reads it); actual departure is Wada plus one calendar day.
 
 ## Free-plan capacity and retention
 

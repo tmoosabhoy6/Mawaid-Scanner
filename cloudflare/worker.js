@@ -4,6 +4,7 @@ import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, st
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
+import { nkerpArrivals, readVisits } from '../src/nkerp.js';
 import { hash, randomToken, equal, seal, unseal } from './crypto.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from '../src/list-queries.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, cleanupDay, CLEAR_ROWS, CLEAR_PDFS, CLEANUP_WRITE_BUDGET, CLEANUP_CHUNK_WRITES } from '../src/archive.js';
@@ -161,7 +162,7 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   return json(await all(db,query.sql,...query.params));
  }
  if(path==='/api/settings'&&method==='GET'){
-  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
+  const info=await stmt(db,'SELECT 1').all();return json({printer:await getSetting(db,'printer',DEFAULT_PRINTER),source:await getSetting(db,'source',DEFAULT_SOURCE),sync:await getSetting(db,'sync',null),syncError:await getSetting(db,'syncError',null),nkerp:await nkerpStatus(db,env),nkerpError:await getSetting(db,'nkerpError',null),timeZone:TIME_ZONE,hosting:'cloudflare-free',maxLabels:MAX_LABELS,databaseBytes:info.meta?.size_after||0,databaseLimitBytes:500_000_000});
  }
  if(path==='/api/settings'&&method==='POST'){
   const body=await boundedBody(request,8192),statements=[];
@@ -258,14 +259,19 @@ async function syncTours(db,body,stamp){
  let tours;try{tours=body.tours.map(t=>validateTour(t)).filter(t=>t.departure>=START_DATE);}catch(e){throw fail(e.message);}
  const keys=tours.map(t=>`${t.tour_id}|${t.arrival}`);if(new Set(keys).size!==keys.length)throw fail('Duplicate tour stays in source.');
  const warnings=Array.isArray(body.warnings)?body.warnings.map(String):[],held=heldTourIds(warnings);
+ // A tour that reached Karbala in the afternoon or at night sits on the next day's Pehli in the Sheet: its stay
+ // starts on the arrival day NKERP gives (src/nkerp.js). The snapshot covers those days, so a change in NKERP is applied.
+ tours=nkerpArrivals(tours,(await getSetting(db,'nkerp',null))?.visits);
+ const corrected=tours.filter(t=>t.sheet_arrival).map(t=>`${t.tour_id} arrived ${t.arrived.replace('T',' ')}; Sheet Pehli ${t.sheet_arrival}`);
  // v2: the first sync after the rule that printed cards keep working runs in full, so it applies that rule.
  const snapshot=await hash(JSON.stringify({v:2,source:[source.spreadsheetId,source.tab],tours:[...tours].sort((a,b)=>a.tour_id.localeCompare(b.tour_id)||a.arrival.localeCompare(b.arrival)),held:[...held].sort()}));
  const previous=await getSetting(db,'sync',null);
- const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],notes:[]};
+ const sync={lastSuccess:stamp,imported:tours.length,snapshot,tabs:Array.isArray(body.tabs)?body.tabs.filter(t=>typeof t==='string').slice(0,100):[],notes:[],corrected};
  const clearError=stmt(db,"DELETE FROM settings WHERE key='syncError'");
  // An unchanged snapshot does not touch any tour row, unless the last one left a stay out: that is planned again.
  if(previous?.snapshot===snapshot&&!previous.skipped){sync.notes=previous.notes||[];sync.warnings=[...sync.notes,...warnings].slice(0,50);await db.batch([settingStmt(db,'sync',sync),clearError]);return json({ok:true,count:tours.length,changedTours:0});}
- const keyed=tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.arrival}`}));
+ // The source key stays on the Sheet's own arrival (Pehli), so the stay keeps its identity whether or not NKERP moves it.
+ const keyed=tours.map(t=>({...t,id:crypto.randomUUID(),source_key:`${source.spreadsheetId}|${source.tab}|${t.tour_id}|${t.sheet_arrival||t.arrival}`}));
  const today=serviceAt(new Date(stamp)).date,stored=await all(db,'SELECT t.id,t.tour_id,t.arrival,t.departure,t.office,t.pax,t.source,t.source_key,t.active,(SELECT COUNT(*) FROM people p WHERE p.tour_id=t.id) AS issued FROM tours t WHERE t.tour_id IS NOT NULL');
  const plan=planSync(stored,keyed,today),kept=keptStays(stored,plan,held,today);
  sync.notes=[...plan.notes,...kept.notes];sync.warnings=[...sync.notes,...plan.skipped.map(skippedWarning),...warnings].slice(0,50);
@@ -290,4 +296,26 @@ export async function respond(request,env,clock){
   return headers(json({error:message},status));
  }
 }
-export default {fetch(request,env){return respond(request,env);}};
+// NKERP status for Settings, without the visits themselves.
+async function nkerpStatus(db,env){const n=await first(db,"SELECT json_extract(value,'$.checkedAt') AS checkedAt,json_array_length(value,'$.visits') AS visits FROM settings WHERE key='nkerp'");return{configured:!!(env.NKERP_LOGIN_ID&&env.NKERP_PASSWORD),checkedAt:n?.checkedAt||null,visits:n?.visits||0};}
+// Every ten minutes: read every Karbala visit's actual arrival from NKERP (read-only) for the Sheet sync to use.
+// The NKERP session is kept, sealed with SYNC_TOKEN, for the next run. When the arrivals change, the Sheet is asked to
+// sync again, which it does within a minute. A failed read keeps the last good arrivals and shows in Settings.
+export async function refreshNkerp(env,now=new Date(),fetcher=fetch){
+ if(!env.DB||!env.NKERP_LOGIN_ID||!env.NKERP_PASSWORD||!env.SYNC_TOKEN||env.SYNC_TOKEN.length<32)return{skipped:true};
+ const db=env.DB.withSession?env.DB.withSession('first-primary'):env.DB,stamp=now.toISOString();
+ let session=null;const sealed=await getSetting(db,'nkerpSession',null);
+ if(sealed)try{session=await unseal(sealed,env.SYNC_TOKEN);}catch{session=null;}
+ try{
+  const read=await readVisits({loginId:env.NKERP_LOGIN_ID,password:env.NKERP_PASSWORD,session,today:serviceAt(now).date,fetcher});
+  const previous=await getSetting(db,'nkerp',null),changed=JSON.stringify(previous?.visits||[])!==JSON.stringify(read.visits);
+  await db.batch([settingStmt(db,'nkerp',{checkedAt:stamp,from:read.from,to:read.to,visits:read.visits}),settingStmt(db,'nkerpSession',await seal(read.session,env.SYNC_TOKEN)),
+   stmt(db,"DELETE FROM settings WHERE key='nkerpError'"),...(changed?[settingStmt(db,'syncRequestedAt',stamp)]:[])]);
+  return{visits:read.visits.length,changed};
+ }catch(error){
+  console.error(JSON.stringify({message:'nkerp_refresh_failed',error:String(error.message).slice(0,200)}));
+  await db.batch([settingStmt(db,'nkerpError',{at:stamp,message:String(error.message).slice(0,300)}),stmt(db,"DELETE FROM settings WHERE key='nkerpSession'")]).catch(()=>{});
+  return{error:error.message};
+ }
+}
+export default {fetch(request,env){return respond(request,env);},scheduled(controller,env,ctx){ctx.waitUntil(refreshNkerp(env,new Date(controller.scheduledTime)));}};

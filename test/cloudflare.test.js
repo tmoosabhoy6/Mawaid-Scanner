@@ -11,10 +11,10 @@ const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER|UPDATE))/).map(s=>s.trim()).filter(Boolean);
 const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql','0008_card_numbers.sql'];
-const compiled=await build({stdin:{contents:`import {respond} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
-async function fixture(overrides={},migrations=MIGRATIONS){
+const compiled=await build({stdin:{contents:`import {respond,refreshNkerp} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));},scheduled(controller,env,ctx){ctx.waitUntil(refreshNkerp(env,new Date(controller.scheduledTime)));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
+async function fixture(overrides={},migrations=MIGRATIONS,outboundService=undefined){
  const credentials={...config,...overrides};
- const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:compiled.outputFiles[0].text,compatibilityDate:'2026-10-20',d1Databases:['DB'],bindings:credentials}));
+ const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:compiled.outputFiles[0].text,compatibilityDate:'2026-10-20',d1Databases:['DB'],bindings:credentials,...(outboundService?{outboundService}:{})}));
  let db;try{db=await mf.getD1Database('DB');}catch(e){await mf.dispose();throw e;}
  // Like `cf d1 migrations apply`, each migration runs as one atomic batch.
  for(const file of migrations)await db.batch(statements(file).map(sql=>db.prepare(sql)));
@@ -518,5 +518,74 @@ test('Cloudflare: migration 0008 numbers people printed earlier without touching
   [{id:'h1',sticker_no:1,sticker_tour:'5'},{id:'l1',sticker_no:1,sticker_tour:'2938'},{id:'n1',sticker_no:null,sticker_tour:null},{id:'s1',sticker_no:1,sticker_tour:'5253'},{id:'s2',sticker_no:2,sticker_tour:'5253'},{id:'x1',sticker_no:null,sticker_tour:null}]);
  assert.deepEqual((await f.db.prepare('SELECT * FROM tours ORDER BY id').all()).results,before);
  assert.deepEqual((await f.db.prepare('PRAGMA foreign_key_check').all()).results,[]);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: a tour arriving in Karbala at night, on the next day\'s Pehli, eats dinner the day it arrives (NKERP)',async()=>{
+ // NKERP as it answered for 26/2291 on 20 November 2026: Karbala arrival 8:45 pm, departure 25 November.
+ const visit={Id:59519000,TourId:428790700,ArrivalDate:'2026-11-20T20:45:00',DepartureDate:'2026-11-25T08:00:00',Tour:{ReferenceNo:'NKERP/TOUR/2026/2291',PaxCount:2}};
+ let nkerpUp=true;const seen=[];
+ const nkerp=async request=>{
+  const path=new URL(request.url).pathname;seen.push(path);
+  if(!nkerpUp)return new Response('down',{status:503});
+  if(path.endsWith('/api/accounts/Login'))return Response.json({ReturnStatus:true,IsAuthenicated:true,UserId:77,Role:'13'},{headers:{'Set-Cookie':'.ASPXAUTH=abc; path=/'}});
+  if(!(request.headers.get('Cookie')||'').includes('.ASPXAUTH=abc'))return new Response('expired',{status:401});
+  if(path.includes('GetSectionIdByGroupId'))return Response.json({});
+  const rows=path.endsWith('getReleasedTours')?[visit]:[];return Response.json({lstMufiquaFinalInZSDTO:rows,TotalRows:rows.length});
+ };
+ const f=await fixture({NKERP_LOGIN_ID:'id',NKERP_PASSWORD:'pw'},MIGRATIONS,nkerp);try{
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ const sync=tours=>f.call('/sync/tours',{...source,tours},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}});
+ const pehli={tour_id:'26/2291',office:'FH Mumbai',arrival:'2026-11-21',departure:'2026-11-25',pax:2};
+ f.setTime('2026-11-20T10:00:00Z');
+ // Before NKERP has been read, the Sheet's Pehli is the arrival: the bug this fixes.
+ assert.equal((await sync([pehli])).status,200);
+ const stay=(await f.call('/tours?date=')).data.find(t=>t.tour_id==='26/2291');assert.equal(stay.arrival,'2026-11-21');
+ const cards=(await f.issue(stay.id)).cards;
+ f.setTime('2026-11-20T17:00:00Z');assert.equal((await f.scan(cards[0].token)).data.reason,'before_arrival');
+ // The ten-minute job reads NKERP and asks the Sheet to sync again.
+ const worker=await f.mf.getWorker();
+ await worker.scheduled({scheduledTime:new Date('2026-11-20T17:00:00Z'),cron:'*/10 * * * *'});
+ const stored=JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='nkerp'").first()).value);
+ assert.deepEqual(stored.visits,[['26/2291','2026-11-20T20:45','2026-11-25']]);
+ assert.equal(JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='syncRequestedAt'").first()).value),'2026-11-20T17:00:00.000Z');
+ assert.ok(seen.some(p=>p.endsWith('/api/accounts/Login')));
+ const sealed=(await f.db.prepare("SELECT value FROM settings WHERE key='nkerpSession'").first()).value;assert.equal(sealed.includes('abc'),false);
+ // The Sheet's next sync starts the stay on the arrival day; the printed card now works at that night's dinner.
+ assert.equal((await sync([pehli])).data.changedTours,1);
+ const moved=(await f.call('/tours?date=')).data.filter(t=>t.tour_id==='26/2291');
+ assert.deepEqual(moved.map(t=>[t.id,t.arrival,t.departure,t.pax]),[[stay.id,'2026-11-20','2026-11-25',2]]);
+ assert.equal((await f.scan(cards[0].token)).data.status,'green');
+ assert.equal((await f.scan(cards[1].token)).data.reason,'admitted');
+ const settings=(await f.call('/settings')).data;
+ assert.deepEqual(settings.sync.corrected,['26/2291 arrived 2026-11-20 20:45; Sheet Pehli 2026-11-21']);
+ assert.equal(settings.nkerp.visits,1);assert.equal(settings.nkerp.configured,true);assert.equal(settings.nkerpError,null);
+ // The next run reuses the session (no sign-in); unchanged arrivals do not ask the Sheet again.
+ const logins=seen.filter(p=>p.endsWith('/api/accounts/Login')).length;
+ await worker.scheduled({scheduledTime:new Date('2026-11-20T17:10:00Z'),cron:'*/10 * * * *'});
+ assert.equal(seen.filter(p=>p.endsWith('/api/accounts/Login')).length,logins);
+ assert.equal(JSON.parse((await f.db.prepare("SELECT value FROM settings WHERE key='syncRequestedAt'").first()).value),'2026-11-20T17:00:00.000Z');
+ assert.equal((await sync([pehli])).data.changedTours,0);
+ // A tour with no cards printed also starts on the arrival day, under the Sheet's source key.
+ visit.Tour.ReferenceNo='NKERP/TOUR/2026/3545';visit.ArrivalDate='2026-11-20T21:05:00';
+ await worker.scheduled({scheduledTime:new Date('2026-11-20T17:20:00Z'),cron:'*/10 * * * *'});
+ await sync([pehli,{...pehli,tour_id:'26/3545',pax:4}]);
+ const fresh=(await f.db.prepare("SELECT arrival,source_key FROM tours WHERE tour_id='26/3545'").first());
+ assert.deepEqual(fresh,{arrival:'2026-11-20',source_key:`${source.spreadsheetId}|Tours|26/3545|2026-11-21`});
+ // 26/2291 is gone from NKERP's answer now: its printed cards keep the arrival day they were moved to.
+ assert.equal((await f.db.prepare("SELECT arrival FROM tours WHERE tour_id='26/2291'").first()).arrival,'2026-11-20');
+ // NKERP down: the last good arrivals stay in use and Settings shows the failure.
+ nkerpUp=false;await worker.scheduled({scheduledTime:new Date('2026-11-20T17:30:00Z'),cron:'*/10 * * * *'});
+ const down=(await f.call('/settings')).data;assert.match(down.nkerpError.message,/HTTP 503/);assert.equal(down.nkerp.visits,1);
+ await sync([pehli,{...pehli,tour_id:'26/3545',pax:5}]);
+ assert.equal((await f.db.prepare("SELECT arrival FROM tours WHERE tour_id='26/3545'").first()).arrival,'2026-11-20');
+ }finally{await f.close();}
+});
+
+test('Cloudflare: without NKERP secrets the job does nothing and Sheet arrivals are used',async()=>{
+ const f=await fixture();try{
+ const worker=await f.mf.getWorker();await worker.scheduled({scheduledTime:new Date('2026-11-20T17:00:00Z'),cron:'*/10 * * * *'});
+ assert.equal(await f.db.prepare("SELECT value FROM settings WHERE key IN ('nkerp','nkerpError')").first(),null);
+ assert.equal((await f.call('/settings')).data.nkerp.configured,false);
  }finally{await f.close();}
 });
