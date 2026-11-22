@@ -1,5 +1,5 @@
 import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, tourIdSql, TIME_ZONE, START_DATE } from '../src/rules.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry } from '../src/scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry, tourParam } from '../src/scan-query.js';
 import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from '../src/sticker.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
@@ -187,15 +187,16 @@ export async function handleRequest(request,env,clock=()=>new Date()){
 }
 async function scan(db,body,now){
  if(!keyValid(body.requestKey))throw fail('A scan request key is required.');
- const {code,typed}=scanEntry(body);
+ const entry=scanEntry(body),{code,typed}=entry;
  // A scan made on an offline phone is checked as at the time it was made.
  const offlineAt=offlineTime(body,now),at=offlineAt||now;
  const service=serviceAt(at),gate=scanGate(body);
  // A typed card number finds its card, which is then checked exactly like that card's QR (see src/sticker.js).
  // Card numbers are only ever added, never changed, so finding the card first cannot race the scan below.
- const found=typed?typedCard(await all(db,TYPED_SQL,...typedParams(typed)),service.date):{hash:code.startsWith('MW1:')?await hash(code.slice(4)):'',miss:null};
+ // A number that is no card's is tried as a tour number, for a card printed without a number (see src/scan-query.js).
+ const found=entry.cardNumber?typedCard(await all(db,TYPED_SQL,...typedParams(typed)),service.date):typed?{hash:'',miss:'unknown_number'}:{hash:code.startsWith('MW1:')?await hash(code.slice(4)):'',miss:null};
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
- const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),found.hash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate,typed,found.miss);
+ const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),found.hash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate,typed,found.miss,tourParam(entry,found));
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);
  const replayed=!row,earlier=REPEAT_REASONS.includes(result.reason)?await first(db,FIRST_ADMISSION_SQL,result.person_id,result.date,result.meal):null;
  return json({...result,replayed,firstScannedAt:earlier?.scanned_at||null,status:GREEN_REASONS.includes(result.reason)&&!replayed?'green':'red',message:replayed?'Request already processed — check the scan log before admitting':reasons[result.reason],serverTime:now.toISOString()});

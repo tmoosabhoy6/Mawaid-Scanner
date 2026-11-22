@@ -31,6 +31,13 @@ export function typedCandidates(value) {
   }
   return out;
 }
+// A card with no number under its QR is checked by typing only its tour number, as printed on the card: "3382", or
+// "26/3382" with the year. Returns the tour number ("3382"), or null when the value cannot be one. A value that is also
+// a card number (such as 3382: guest 33 of tour 82) is tried as a card number first (see the scan in app.js).
+export function typedTour(value) {
+  const match = /^(?:\d{2}\/)?(\d{1,6})$/.exec(typedDigits(value));
+  return match ? match[1] : null;
+}
 // The people a typed number could mean, with each one's current card (or, for a person whose card was replaced
 // before replacing was removed, their latest). Params: three (tour, sticker number) pairs; unused pairs are NULL.
 export const TYPED_SQL = `SELECT p.id AS person_id,t.arrival,t.departure,

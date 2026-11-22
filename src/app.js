@@ -8,7 +8,7 @@ import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFF
 import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from './summary.js';
-import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry } from './scan-query.js';
+import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry, tourParam } from './scan-query.js';
 import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from './sticker.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
@@ -170,13 +170,14 @@ export function createApp(options = {}) {
   app.post('/api/scan', (req, res) => {
     const { requestKey } = req.body;
     if (typeof requestKey !== 'string' || !/^[\w-]{16,100}$/.test(requestKey)) throw fail('A scan request key is required.');
-    const { code, typed } = scanEntry(req.body);
+    const entry = scanEntry(req.body), { code, typed } = entry;
     // A scan made on an offline phone is checked as at the time it was made.
     const offlineAt = offlineTime(req.body, now()), at = offlineAt || now(), service = serviceAt(at), gate = scanGate(req.body);
     const result = transaction(db, () => {
       // A typed card number finds its card, which is then checked exactly like that card's QR (see sticker.js).
-      const found = typed ? typedCard(db.prepare(TYPED_SQL).all(...typedParams(typed)), service.date) : { hash: code.startsWith('MW1:') ? hash(code.slice(4)) : '', miss: null };
-      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), found.hash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate, typed, found.miss);
+      // A number that is no card's is tried as a tour number, for a card printed without a number (see scan-query.js).
+      const found = entry.cardNumber ? typedCard(db.prepare(TYPED_SQL).all(...typedParams(typed)), service.date) : typed ? { hash: '', miss: 'unknown_number' } : { hash: code.startsWith('MW1:') ? hash(code.slice(4)) : '', miss: null };
+      const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), found.hash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate, typed, found.miss, tourParam(entry, found));
       return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
     const earlier = REPEAT_REASONS.includes(result.reason) ? db.prepare(FIRST_ADMISSION_SQL).get(result.person_id, result.date, result.meal) : null;

@@ -212,7 +212,7 @@ async function logsView(){
     const counts=new URLSearchParams({date:params.get('date')||'',tour:params.get('tour')||'',office:params.get('office')||''});
     const [rows,gates]=await Promise.all([api(`/logs?${params}`),searching||!params.get('date')?null:api(`/logs/gates?${counts}`)]);if(n!==loads)return;
     $('#gateCounts').innerHTML=gateCountsHtml(gates);
-    $('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Scanner</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${r.gate?`<span class="chip gate-chip ${e(r.gate)}">${e(GATE_LABELS[r.gate]||r.gate)}</span>`:'—'}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${GREEN_REASONS.includes(r.reason)?'green-chip':'red-chip'}">${GREEN_REASONS.includes(r.reason)?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}${r.typed_code?` <span class="chip" title="Card number typed at the gate instead of scanning the QR">Typed ${e(r.typed_code)}</span>`:''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
+    $('#logTable').innerHTML=rows.length?`<table><thead><tr><th>Time · Karbala</th><th>Scanner</th><th>Tour ID</th><th>Office</th><th>Person</th><th>Meal</th><th>Result</th><th>Reason</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(dates(r.scanned_at))}</td><td>${r.gate?`<span class="chip gate-chip ${e(r.gate)}">${e(GATE_LABELS[r.gate]||r.gate)}</span>`:'—'}</td><td>${e(r.display_tour||'—')}</td><td>${e(r.office||'—')}</td><td>${e(r.person_no||'—')}</td><td>${e(r.meal||'—')}</td><td><span class="chip ${GREEN_REASONS.includes(r.reason)?'green-chip':'red-chip'}">${GREEN_REASONS.includes(r.reason)?'Green':'Red'}</span>${r.offline?' <span class="chip" title="Checked on a phone without a connection, sent later">Offline</span>':''}${r.typed_code?r.by_tour?` <span class="chip" title="Tour number typed for a card with no number; one guest of the tour was counted">Tour no. ${e(r.typed_code)}</span>`:` <span class="chip" title="Card number typed at the gate instead of scanning the QR">Typed ${e(r.typed_code)}</span>`:''}</td><td>${e(r.reason.replaceAll('_',' '))}</td></tr>`).join('')}</tbody></table><p class="status-note">Showing the latest ${number(1000)} matching scans.</p>`:'<div class="empty"><h2>No scans match</h2><p>Try another date or clear the filters.</p></div>';};
   liveFilters($('#logFilters'),load);await load();
 }
 const GATE_LABELS={men:'Men’s',women:'Women’s'};
@@ -349,7 +349,7 @@ function archiveFiles(d,before,name){
   for(const m of d.meals){const key=`${m.date}|${m.tour_key}`;const row=daily.get(key)||{date:m.date,tour_id:m.tour_id,office:m.office,pax:pax.get(m.tour_key)??'',breakfast:0,lunch:0,dinner:0};row[m.meal]++;daily.set(key,row);}
   const summary=[...daily.values()].sort((a,b)=>a.date.localeCompare(b.date)||String(a.tour_id).localeCompare(String(b.tour_id)));
   return [
-    ['scan-log.csv',csv(['Time (Karbala)','Service date','Meal','Scanner','Tour ID','Office','Person','Result','Reason','Checked offline','Card number typed'],d.scans.map(r=>[karbalaTime(r.scanned_at),r.date,mealName(r.meal),GATE_LABELS[r.gate]||'',r.tour_id,r.office,r.person_no,GREEN_REASONS.includes(r.reason)?'Admitted':'Declined',r.reason.replaceAll('_',' '),r.offline?'Yes':'',r.typed_code||'']))],
+    ['scan-log.csv',csv(['Time (Karbala)','Service date','Meal','Scanner','Tour ID','Office','Person','Result','Reason','Checked offline','Card number typed','Tour number typed'],d.scans.map(r=>[karbalaTime(r.scanned_at),r.date,mealName(r.meal),GATE_LABELS[r.gate]||'',r.tour_id,r.office,r.person_no,GREEN_REASONS.includes(r.reason)?'Admitted':'Declined',r.reason.replaceAll('_',' '),r.offline?'Yes':'',r.by_tour?'':r.typed_code||'',r.by_tour?r.typed_code:'']))],
     ['meals-served.csv',csv(['Service date','Meal','Tour ID','Office','Person','Scanned (Karbala)'],d.meals.map(r=>[r.date,mealName(r.meal),r.tour_id,r.office,r.person_no,karbalaTime(r.scanned_at)]))],
     ['daily-meal-summary.csv',csv(['Service date','Tour ID','Office','PAX','Breakfast','Lunch','Dinner'],summary.map(r=>[r.date,r.tour_id,r.office,r.pax,r.breakfast,r.lunch,r.dinner]))],
     ['tours.csv',csv(['Tour ID','ITS','Office','Arrival','Departure','PAX','Cards issued','Source','Active','Added (Karbala)'],d.tours.map(t=>[t.tour_id,t.its,t.office,t.arrival,t.departure,t.pax,t.issued,t.source==='sheets'?'Google Sheet':'Added manually',t.active?'Yes':'No',karbalaTime(t.created_at)]))],
@@ -409,7 +409,7 @@ let offlineData=null,scanQueue=[],connected=true,retryTimer=null;
 // offline_unlisted: a printed card that is newer than the phone's list. The phone cannot check it, so the guest is let in
 // and the server checks the card when the scan is sent; the scan log then shows the real result.
 const GREEN_REASONS=['admitted','breakfast_repeat','breakfast_unlisted','offline_unlisted'];
-const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Not a meal card',offline_unlisted:'Welcome — a new card this phone cannot check yet. It is checked when the connection returns',unknown_number:'No card on this phone’s list has this number. Check the number, or scan the QR code',ambiguous_number:'This number matches more than one guest. Scan the QR code',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',already_scanned:'Already admitted for this meal today'};
+const OFFLINE_REASONS={admitted:'Welcome — meal allowed',breakfast_repeat:'Welcome — already counted for breakfast',breakfast_unlisted:'Welcome — breakfast is open to all. Card not on this phone’s list',unknown_card:'Not a meal card',offline_unlisted:'Welcome — a new card this phone cannot check yet. It is checked when the connection returns',unknown_number:'No card or tour on this phone’s list has this number. Check the number, or scan the QR code',tour_full:'Every guest of this tour has already had this meal',ambiguous_number:'This number matches more than one guest. Scan the QR code',inactive_tour:'Tour is no longer active',replaced_card:'This card was replaced',before_arrival:'Arrival date has not started',after_departure:'Stay has ended',over_capacity:'Person exceeds the current tour PAX',outside_meal_time:'Meal service is closed',already_scanned:'Already admitted for this meal today'};
 function readStored(key,fallback){try{return JSON.parse(localStorage.getItem(key))??fallback;}catch{return fallback;}}
 function store(key,value){try{localStorage.setItem(key,JSON.stringify(value));}catch{}}
 const clock12=v=>new Intl.DateTimeFormat('en-GB',{hour:'numeric',minute:'2-digit',hour12:true,timeZone:TIME_ZONE}).format(new Date(v));
@@ -424,7 +424,7 @@ function karbalaService(now,meals){
 // Merge one download into the phone's copy. A person's newer card replaces their older ones.
 function applyOfflineData(data){
   if(!Array.isArray(data.cards))return;
-  const d=data.full||!offlineData||offlineData.hash!==data.hash||offlineData.v!==OFFLINE_VERSION?{v:OFFLINE_VERSION,hash:data.hash,cards:{},tours:{},served:{},servedDate:data.date}:offlineData;
+  const d=data.full||!offlineData||offlineData.hash!==data.hash||offlineData.v!==OFFLINE_VERSION?{v:OFFLINE_VERSION,hash:data.hash,cards:{},tours:{},served:{},tourServed:{},servedDate:data.date}:offlineData;
   if(data.full)d.cards={};
   if(data.tours){d.tours={};for(const [id,arrival,departure,pax,active] of data.tours)d.tours[id]=[arrival,departure,pax,active];}
   // Each card: person, stay, person number, replaced, and the card number printed under its QR (sticker number, tour number).
@@ -432,8 +432,10 @@ function applyOfflineData(data){
     if(!data.full)for(const old of Object.values(d.cards))if(old[0]===person)old[3]=1;
     d.cards[hash]=[person,tour,no,revoked,stickerNo??null,stickerTour??null];
   }
-  if(d.servedDate!==data.date){d.served={};d.servedDate=data.date;}
+  if(d.servedDate!==data.date){d.served={};d.tourServed={};d.servedDate=data.date;}
   for(const [person,meal] of data.admissions||[])d.served[`${person}|${meal}`]??=1;
+  // Meals counted by tour number can move between guests, so each download replaces them (see src/offline.js).
+  if(Array.isArray(data.tourAdmissions)){d.tourServed={};for(const [person,meal] of data.tourAdmissions)d.tourServed[`${person}|${meal}`]=1;}
   Object.assign(d,{cardCursor:data.cardCursor,admissionCursor:data.admissionCursor,meals:data.meals,updatedAt:+new Date()});
   offlineData=d;store(OFFLINE_DATA_KEY,d);
 }
@@ -478,22 +480,45 @@ function typedOffline(d,typed,date){
   const days=r=>Math.abs(Date.parse(date<r.arrival?r.arrival:r.departure)-Date.parse(date));rows.sort((a,b)=>days(a)-days(b));
   return rows.length>1&&days(rows[0])===days(rows[1])?{reason:'ambiguous_number'}:{card:rows[0].card};
 }
+// A card with no number under its QR: only its tour number is typed, such as 3382 or 26/3382 (src/sticker.js typedTour).
+const typedTour=value=>/^(?:\d{2}\/)?(\d{1,6})$/.exec(typedDigits(value))?.[1]??null;
+// Has this guest had this meal, on the phone's copy? 'tour' when the meal was counted by tour number.
+const servedAs=(d,person,meal)=>{const key=`${person}|${meal}`;return d.served[key]?'card':d.tourServed?.[key]?'tour':null;};
+// The guest of a tour number to count for a meal when it is typed for a card with no number: staying, within PAX, holding
+// a current card and not yet served; the highest card number first. Mirrors freeGuestSql in src/scan-query.js.
+function freeGuest(d,tour,date,meal,except=null){
+  let best=null;
+  for(const card of Object.values(d.cards)){
+    const [person,stay,no,revoked,stickerNo,stickerTour]=card,t=d.tours[stay];
+    if(stickerTour!==tour||revoked||!t||!t[3]||date<t[0]||date>t[1]||no>t[2]||person===except||servedAs(d,person,meal))continue;
+    if(!best||stickerNo>best[4])best=card;
+  }
+  return best;
+}
 // The same rules as the server, in the same order, against the phone's copy. entry: { code } or { number }.
 async function checkOffline(entry,now){
   const d=offlineData,service=karbalaService(now,d?.meals),result={date:service.date,meal:service.meal,offline:true};
   const reason=await(async()=>{
-    const breakfast=service.meal==='breakfast',found=entry.number?typedOffline(d,entry.number,service.date):{card:entry.code.startsWith('MW1:')&&d.cards[await sha256(entry.code.slice(4),d.hash)]};
+    const breakfast=service.meal==='breakfast',number=entry.number,byNumber=number&&typedCandidates(number).length?typedOffline(d,number,service.date):number?{reason:'unknown_number'}:null;
+    // A number that is no card's is tried as a tour number: a guest of that tour who has not had this meal is counted.
+    const tourNo=number&&byNumber.reason==='unknown_number'?typedTour(number):null;
+    const found=tourNo?{card:freeGuest(d,tourNo,service.date,service.meal),reason:'unknown_number'}:byNumber||{card:entry.code.startsWith('MW1:')&&d.cards[await sha256(entry.code.slice(4),d.hash)]};
+    // As on the server, a tour number counts as one only when a stay of that tour number is staying today.
+    if(tourNo&&(found.card||Object.values(d.cards).some(c=>c[5]===tourNo&&d.tours[c[1]]?.[3]&&d.tours[c[1]][0]<=service.date&&service.date<=d.tours[c[1]][1])))result.by_tour=1;
     const card=found.card,tour=card&&d.tours[card[1]];
     if(!card||!tour){
+      if(result.by_tour)return breakfast?'breakfast_repeat':'tour_full';
       if(breakfast)return 'breakfast_unlisted';
       // A real card missing from the list was printed after the phone's last update: never turn that guest away.
       if(!card&&!entry.number&&CARD_CODE.test(entry.code))return 'offline_unlisted';
       // The list holds every stay that has not ended, so a known card without its stay has left.
       return card?'after_departure':found.reason||'unknown_card';
     }
-    const [person,,no,revoked]=card,[arrival,departure,pax,active]=tour,served=d.servedDate===service.date&&d.served[`${person}|${service.meal}`];
-    Object.assign(result,{person_id:person,person_no:no});
-    if(typeof served==='string')result.firstScannedAt=served;
+    const [person,,no,revoked]=card,[arrival,departure,pax,active]=tour,today=d.servedDate===service.date,key=`${person}|${service.meal}`;
+    // A meal counted for this guest by tour number moves to another guest of the tour who has not eaten (as on the server).
+    const as=today?servedAs(d,person,service.meal):null,moveTo=as==='tour'?freeGuest(d,card[5],service.date,service.meal,person):null,served=as&&!moveTo;
+    Object.assign(result,{person_id:person,person_no:no});if(moveTo)result.moveTo=moveTo[0];
+    const first=d.served[key]||d.tourServed?.[key];if(served&&typeof first==='string')result.firstScannedAt=first;
     if(breakfast)return served?'breakfast_repeat':'admitted';
     if(!active)return 'inactive_tour';if(revoked)return 'replaced_card';
     if(service.date<arrival)return 'before_arrival';if(service.date>departure)return 'after_departure';
@@ -505,8 +530,12 @@ async function checkOffline(entry,now){
 }
 function recordServed(result,at){
   const d=offlineData;if(!d||result.status!=='green'||result.reason!=='admitted'||!result.person_id||!result.meal)return;
-  if(d.servedDate!==result.date){d.served={};d.servedDate=result.date;}
-  d.served[`${result.person_id}|${result.meal}`]=at;store(OFFLINE_DATA_KEY,d);
+  if(d.servedDate!==result.date){d.served={};d.tourServed={};d.servedDate=result.date;}
+  d.tourServed??={};const key=`${result.person_id}|${result.meal}`;
+  // A meal counted by tour number is kept apart, so it can move to another guest of the tour when this guest's card is checked.
+  if(result.moveTo){d.tourServed[`${result.moveTo}|${result.meal}`]=d.tourServed[key]||at;delete d.tourServed[key];}
+  if(result.by_tour)d.tourServed[key]=at;else d.served[key]=at;
+  store(OFFLINE_DATA_KEY,d);
 }
 // Offline scans are sent in order; one that the server refuses outright is dropped so it cannot block the rest.
 // Only one sender runs at a time, so a long backlog is never sent twice.
@@ -523,7 +552,7 @@ async function scannerView(){
   await stopScanner();currentView='scanner';
   offlineData=readStored(OFFLINE_DATA_KEY,null);scanQueue=readStored(OFFLINE_QUEUE_KEY,[]);connected=true;const savedGate=readStored(GATE_KEY,'men');gate=GATE_LABELS[savedGate]?savedGate:'men';
   navigator.serviceWorker?.register('/sw.js',{scope:'/scanner'}).catch(()=>{});
-  $('#app').innerHTML=`<div class="scanner-shell"><nav class="gate-tabs" role="tablist" aria-label="Scanner">${Object.entries(GATE_LABELS).map(([key,label])=>`<button type="button" role="tab" class="gate-tab ${key}" data-gate="${key}">${label}</button>`).join('')}</nav><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47"><span id="scannerTitle">Mawaid scanner</span></h1><span class="link-chip" id="linkChip"></span></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Connecting…</strong></div><div class="camera-box" id="reader"></div><form class="number-scan" id="numberScan" autocomplete="off"><label for="cardNumber">QR won’t scan? Type the number under it</label><div><input id="cardNumber" inputmode="numeric" enterkeyhint="go" maxlength="16" placeholder="e.g. 015253" autocomplete="off" required><button class="primary" id="numberSubmit">Check</button></div></form><button class="primary" id="startCamera">Start camera</button><p class="scan-tip" id="scanTip">Hold one QR inside the frame. Green screen and a high beep: admit. Red screen and a buzzer: do not admit.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div><div class="flash" id="flash" hidden><strong></strong><span></span></div>`;
+  $('#app').innerHTML=`<div class="scanner-shell"><nav class="gate-tabs" role="tablist" aria-label="Scanner">${Object.entries(GATE_LABELS).map(([key,label])=>`<button type="button" role="tab" class="gate-tab ${key}" data-gate="${key}">${label}</button>`).join('')}</nav><header class="scanner-head"><h1><img src="${LOGO}" alt="" width="44" height="47"><span id="scannerTitle">Mawaid scanner</span></h1><span class="link-chip" id="linkChip"></span></header><small>Faiz-e-Husaini Karbala · Karbala time</small><div class="scan-result" id="scanResult" role="status" aria-live="assertive"><strong>Connecting…</strong></div><div class="camera-box" id="reader"></div><form class="number-scan" id="numberScan" autocomplete="off"><label for="cardNumber">QR won’t scan? Type the number under it. No number on the card? Type its tour number</label><div><input id="cardNumber" inputmode="numeric" enterkeyhint="go" maxlength="16" placeholder="e.g. 015253 or 5253" autocomplete="off" required><button class="primary" id="numberSubmit">Check</button></div></form><button class="primary" id="startCamera">Start camera</button><p class="scan-tip" id="scanTip">Hold one QR inside the frame. Green screen and a high beep: admit. Red screen and a buzzer: do not admit.</p><details class="manual"><summary>Use a USB scanner or enter a QR value</summary><form id="manualScan"><input id="manualCode" aria-label="QR code value" placeholder="MW1:…" autocomplete="off" required><button id="manualSubmit">Scan</button></form></details><p class="status-note" id="scannerStatus"></p>${role==='admin'?'<a href="/">Back to printing system</a>':''}</div><div class="flash" id="flash" hidden><strong></strong><span></span></div>`;
   $('#app').addEventListener('pointerdown',unlockAudio);$('#app').addEventListener('keydown',unlockAudio);
   $('#flash').onclick=()=>{$('#flash').hidden=true;};
   // Switching tab changes the scanner for the next scan; the camera keeps running.
@@ -584,11 +613,12 @@ async function scannerView(){
     scanQueue.push({...entry,requestKey,at:at.toISOString(),status:result.status,gate});store(OFFLINE_QUEUE_KEY,scanQueue);showLink();
     return result;
   }
-  // fromCamera: a camera read. Codes typed or sent by a USB scanner are only held back for 3 s after the same code.
-  // A typed card number is checked like its card's QR, by the server or, offline, against the phone's copy.
+  // fromCamera: a camera read. Codes sent by a USB scanner are only held back for 3 s after the same code.
+  // A typed number is checked like its card's QR, by the server or, offline, against the phone's copy. It is never held
+  // back: the same tour number is typed once for each guest of that tour whose card has no number.
   async function submit(code,fromCamera=false,typed=false){
     if(fromCamera&&stillInView(code))return;
-    if(scannerBusy)return; if(!fromCamera&&code===lastCode&&Date.now()-lastAt<3000)return;
+    if(scannerBusy)return; if(!fromCamera&&!typed&&code===lastCode&&Date.now()-lastAt<3000)return;
     scannerBusy=true;lastCode=code;lastAt=Date.now();if(fromCamera)seenCards.set(code,lastAt);
     showResult('','Checking card…','Please wait for the result.');
     const at=new Date();
@@ -596,12 +626,15 @@ async function scannerView(){
     recordServed(result,at.toISOString());
     // The wait for the same card starts again once its result is on screen, however long the check took.
     lastAt=Date.now();if(fromCamera&&lastCode===code)seenCards.set(code,lastAt);
-    const duplicate=result.reason==='already_scanned',title=result.status==='green'?'ALLOW':duplicate?'ALREADY SCANNED':'DO NOT ADMIT';
-    const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}${sinceText(result.firstScannedAt,result.serverTime)}`:''),typed?`No. ${code}`:result.person_no?`Person ${result.person_no}`:'',result.offline?`Checked offline · card list from ${listTime(offlineData?.updatedAt)}`:''].filter(Boolean).join(' · ');
-    showResult(result.status==='green'?'green':'red',title,detail);flash(result.status==='green',title,detail);
+    const duplicate=result.reason==='already_scanned',title=result.status==='green'?'ALLOW':duplicate||result.reason==='tour_full'?'ALREADY SCANNED':'DO NOT ADMIT';
+    // A card number belongs to one guest. Typing 01 and the tour number for a card that has no number checks guest 01.
+    const byTour=typed&&result.by_tour;
+    const hint=typed&&duplicate&&!result.by_tour&&typedTour(code.slice(2))?`No. ${code} is guest ${code.slice(0,2)}’s card. If this card has no number, type only its tour number`:'';
+    const detail=[result.message+((duplicate||result.reason==='breakfast_repeat')&&result.firstScannedAt?`, at ${clock12(result.firstScannedAt)}${sinceText(result.firstScannedAt,result.serverTime)}`:''),hint||(byTour?`Tour no. ${typedTour(code)}`:typed?`No. ${code}`:result.person_no?`Person ${result.person_no}`:''),result.offline?`Checked offline · card list from ${listTime(offlineData?.updatedAt)}`:''].filter(Boolean).join(' · ');
+    showResult(result.status==='green'?'green':'red',title,detail);flash(result.status==='green',title,detail,typed);
     beep(result.status==='green',duplicate);
     // After green the next card can be scanned as soon as the flash clears; the same card stays ignored while in view.
-    setTimeout(()=>{scannerBusy=false;},result.status==='green'?GREEN_FLASH_MS:1300);
+    setTimeout(()=>{scannerBusy=false;},result.status==='green'?(typed?TYPED_FLASH_MS:GREEN_FLASH_MS):1300);
     readyLater();
   }
   $('#startCamera').onclick=()=>guard(()=>busy($('#startCamera'),async()=>{
@@ -617,11 +650,14 @@ async function scannerView(){
   // The number box under the camera. A USB scanner that types a QR value into it is checked as that QR.
   // A number that cannot be a card number is turned away on the phone, without waiting for the server.
   $('#numberScan').onsubmit=ev=>{
-    ev.preventDefault();unlockAudio();const input=$('#cardNumber'),value=input.value.trim();input.value='';
+    ev.preventDefault();unlockAudio();const input=$('#cardNumber'),value=input.value.trim();
+    // While the last result is still showing, the number stays in the box so Check can be pressed again.
+    if(scannerBusy)return;
+    input.value='';
     // The keyboard closes, so the full-screen result is not hidden behind it.
     input.blur();
     if(value.startsWith('MW1:'))return submit(value);
-    if(!typedCandidates(value).length){if(scannerBusy)return;const detail=`“${value}” is not a card number. Type the digits under the QR, such as 015253.`;showResult('red','DO NOT ADMIT',detail);flash(false,'CHECK THE NUMBER',detail);beep(false);readyLater();return;}
+    if(!typedCandidates(value).length&&!typedTour(value)){const detail=`“${value}” is not a card number. Type the digits under the QR, such as 015253, or the tour number if the card has none.`;showResult('red','DO NOT ADMIT',detail);flash(false,'CHECK THE NUMBER',detail);beep(false);readyLater();return;}
     submit(typedDigits(value),false,true);
   };
   await update();
@@ -634,17 +670,19 @@ function showResult(color,title,detail){const box=$('#scanResult');if(!box)retur
 // A full-screen colour flash, so gate staff can see the result while watching the queue. Tap to dismiss.
 // Green clears quickly so the queue keeps moving; red stays up long enough to stop the guest.
 // SAME_CARD_MS: how long a card the camera has just checked must be out of view before it is checked again.
-const GREEN_FLASH_MS=450,RED_FLASH_MS=2500,SAME_CARD_MS=8000;
+const GREEN_FLASH_MS=450,TYPED_FLASH_MS=1800,RED_FLASH_MS=2500,SAME_CARD_MS=8000;
 // "(2 min ago)" after a duplicate's first time, so gate staff can tell a guest back for seconds from a card read twice.
 function sinceText(first,now){
   const seconds=Math.round(((now?new Date(now):new Date())-new Date(first))/1000);
   if(!(seconds>=0)||seconds>=3600)return '';
   return seconds<60?` (${seconds} s ago)`:` (${Math.floor(seconds/60)} min ago)`;
 }
-function flash(green,title,detail){
+// typed: the result of a number typed in the box. Its green screen stays longer, because it appears while the phone's
+// keyboard is closing; a camera scan keeps the short flash so the queue keeps moving.
+function flash(green,title,detail,typed=false){
   const box=$('#flash');if(!box)return;
   box.className=`flash ${green?'green':'red'}`;$('strong',box).textContent=title;$('span',box).textContent=detail;box.hidden=false;
-  clearTimeout(flash.timer);flash.timer=setTimeout(()=>{box.hidden=true;},green?GREEN_FLASH_MS:RED_FLASH_MS);
+  clearTimeout(flash.timer);flash.timer=setTimeout(()=>{box.hidden=true;},green?(typed?TYPED_FLASH_MS:GREEN_FLASH_MS):RED_FLASH_MS);
 }
 // One audio context, unlocked by the first tap: phones block sound until the page has been touched.
 let audio=null;

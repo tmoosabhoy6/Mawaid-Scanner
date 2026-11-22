@@ -560,8 +560,8 @@ test('scanner: a card number typed under the camera is checked online and offlin
  assert.equal(d.querySelector('#flash').className,'flash green');assert.match(result().textContent,/ALLOW/);assert.match(result().textContent,/No\. 013205/);
  assert.equal(input.value,'','the box is cleared for the next guest');
  assert.deepEqual({...f.db.prepare('SELECT person_id,typed_code,reason,offline FROM scan_logs').get()},{person_id:cards[0].person_id,typed_code:'013205',reason:'admitted',offline:0});
- // Not a card number: red at once, without asking the server.
- await new Promise(r=>setTimeout(r,500));clear();const before=requests.length;send('12a');
+ // Not a card number: red at once, without asking the server. A typed green stays up longer than a camera one.
+ await new Promise(r=>setTimeout(r,1900));clear();const before=requests.length;send('12a');
  await waitFor(()=>result().classList.contains('red'));assert.match(result().textContent,/not a card number/);assert.equal(requests.length,before);
  // A USB scanner typing a QR value into the box is checked as that QR.
  await new Promise(r=>setTimeout(r,1400));clear();send(`MW1:${cards[1].token}`);
@@ -569,12 +569,12 @@ test('scanner: a card number typed under the camera is checked online and offlin
  // Offline: the phone finds the card by its number and applies the same rules.
  offline=true;await new Promise(r=>setTimeout(r,500));clear();send('033205');
  await waitFor(()=>result().classList.contains('green'));assert.match(result().textContent,/Checked offline/);assert.match(result().textContent,/No\. 033205/);
- await new Promise(r=>setTimeout(r,3100));clear();send('033205');
+ await new Promise(r=>setTimeout(r,1900));clear();send('033205');
  await waitFor(()=>result().querySelector('strong').textContent==='ALREADY SCANNED');
  await new Promise(r=>setTimeout(r,1400));clear();send('013205');
  await waitFor(()=>result().querySelector('strong').textContent==='ALREADY SCANNED');
  await new Promise(r=>setTimeout(r,1400));clear();send('093205');
- await waitFor(()=>/No card on this phone’s list has this number/.test(result().textContent));
+ await waitFor(()=>/No card or tour on this phone’s list has this number/.test(result().textContent));
  assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,4);
  // Back online: the typed scans are sent with their numbers and recorded as offline.
  offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
@@ -584,6 +584,56 @@ test('scanner: a card number typed under the camera is checked online and offlin
  // The scan log marks typed scans.
  const admin=domFor(f,'/');try{const a=admin.window.document;admin.window.location.hash='#logs';
   await waitFor(()=>a.querySelector('#logTable table'));assert.equal([...a.querySelectorAll('#logTable .chip')].filter(c=>/^Typed \d+$/.test(c.textContent)).length,5);
+ }finally{admin.window.close();}
+ }finally{dom?.window.close();f.close();}
+});
+
+// Cards printed before card numbers have none under the QR. Typing 01 and the tour number checks guest 01's card, so the
+// scanner says so; typing only the tour number counts a guest of the tour who has not eaten, online and offline.
+test('scanner: a tour number typed for a card with no number, online and offline, and a guest’s own card later',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,4),{cards}=await issue(f,t.id);f.setTime('2026-10-21T10:22:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false,requests=[];
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');requests.push(url);return online(url,options);};
+ await waitFor(()=>d.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ const form=d.querySelector('#numberScan'),input=d.querySelector('#cardNumber');
+ assert.match(d.querySelector('label[for="cardNumber"]').textContent,/No number on the card\? Type its tour number/);
+ const send=value=>{input.value=value;submit(w,form);},result=()=>d.querySelector('#scanResult'),title=()=>result().querySelector('strong').textContent,clear=()=>{result().className='scan-result';};
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ send('013205');await waitFor(()=>result().classList.contains('green'));
+ // Typing 01 and the tour number again is guest 01's card: the scanner says to type only the tour number.
+ await wait(1900);clear();send('013205');
+ await waitFor(()=>title()==='ALREADY SCANNED');assert.match(result().textContent,/No\. 013205 is guest 01’s card\. If this card has no number, type only its tour number/);
+ await wait(1400);clear();send('3205');
+ await waitFor(()=>result().classList.contains('green'));assert.match(result().textContent,/ALLOW/);assert.match(result().textContent,/Tour no\. 3205/);
+ assert.equal(d.querySelector('#flash').className,'flash green');
+ // Check pressed while the last result is still up keeps the number in the box instead of losing it.
+ const before=requests.length;send('3205');await wait(100);assert.equal(input.value,'3205');assert.equal(requests.length,before);
+ await wait(1900);clear();submit(w,form);
+ await waitFor(()=>result().classList.contains('green'));assert.equal(input.value,'');
+ const lunch=()=>f.db.prepare("SELECT p.person_no,a.by_tour FROM admissions a JOIN people p ON p.id=a.person_id WHERE a.meal='lunch' ORDER BY p.person_no").all().map(r=>[r.person_no,r.by_tour]);
+ assert.deepEqual(lunch(),[[1,0],[3,1],[4,1]]);
+ // Offline: guest 04's own card goes green and the tour-number meal moves to guest 02, the one guest left.
+ offline=true;await wait(1900);clear();send(`MW1:${cards[3].token}`);
+ await waitFor(()=>result().classList.contains('green'));assert.match(result().textContent,/Checked offline/);
+ await wait(500);clear();send('3205');
+ await waitFor(()=>title()==='ALREADY SCANNED');assert.match(result().textContent,/Every guest of this tour has already had this meal/);assert.match(result().textContent,/Tour no\. 3205/);
+ await wait(1400);clear();send(`MW1:${cards[1].token}`);
+ await waitFor(()=>title()==='ALREADY SCANNED');
+ // Back online the server applies the same rule; the tour never gets more lunches than its PAX.
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT person_no,reason,by_tour FROM scan_logs WHERE offline=1 ORDER BY id').all().map(r=>[r.person_no,r.reason,r.by_tour]),
+  [[4,'admitted',null],[null,'tour_full',1],[2,'already_scanned',null]]);
+ assert.deepEqual(lunch(),[[1,0],[2,1],[3,1],[4,0]]);
+ // The phone's next download carries the moved meal.
+ d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>Object.keys(JSON.parse(w.localStorage.getItem('mawaidScannerData')).tourServed).sort().join()===[cards[1].person_id,cards[2].person_id].map(id=>`${id}|lunch`).sort().join());
+ // The scan log shows tour numbers apart from card numbers.
+ const admin=domFor(f,'/');try{const a=admin.window.document;admin.window.location.hash='#logs';
+  await waitFor(()=>a.querySelector('#logTable table'));const chips=[...a.querySelectorAll('#logTable .chip')].map(c=>c.textContent);
+  assert.equal(chips.filter(c=>c==='Tour no. 3205').length,3);assert.equal(chips.filter(c=>c==='Typed 013205').length,2);
  }finally{admin.window.close();}
  }finally{dom?.window.close();f.close();}
 });

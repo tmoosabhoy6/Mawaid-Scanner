@@ -10,7 +10,7 @@ import { hash } from '../cloudflare/crypto.js';
 const config={ADMIN_PASSWORD:'worker-admin-password-12345',SYNC_TOKEN:'synthetic-worker-sync-token-1234567890'};
 // Split a migration into statements; trigger bodies keep their inner semicolons because their lines are indented.
 const statements=file=>readFileSync(`cloudflare/migrations/${file}`,'utf8').replace(/^--.*$/gm,'').trim().split(/;\s*\n(?=(?:CREATE|PRAGMA|DROP|INSERT|ALTER|UPDATE))/).map(s=>s.trim()).filter(Boolean);
-const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql','0008_card_numbers.sql'];
+const MIGRATIONS=['0001_initial.sql','0002_optional_tour_id_its_safari.sql','0003_safari_print_log.sql','0004_query_cost_and_daily_counts.sql','0005_extensions_offline_scans.sql','0006_scanner_gates.sql','0007_shared_tour_id.sql','0008_card_numbers.sql','0009_tour_number_entry.sql'];
 const compiled=await build({stdin:{contents:`import {respond,refreshNkerp} from './cloudflare/worker.js';export default {fetch(request,env){return respond(request,env,()=>new Date(request.headers.get('X-Test-Time')||'2026-10-21T04:00:00Z'));},scheduled(controller,env,ctx){ctx.waitUntil(refreshNkerp(env,new Date(controller.scheduledTime)));}}`,resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(overrides={},migrations=MIGRATIONS,outboundService=undefined){
  const credentials={...config,...overrides};
@@ -380,7 +380,7 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  INSERT INTO scan_logs(request_key,date,reason,scanned_at) SELECT 'history-'||i,'2026-10-20','unknown_card','x' FROM n`).run();
  const scans=[];
  for(const [key,meal] of [['load-first','breakfast'],['load-lunch','lunch'],['load-duplicate','lunch'],['load-dinner','dinner']]) {
-   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0,'men',null,null).all();
+   const r=await f.db.prepare(SCAN_SQL).bind(key,'2026-10-21','2026-10-21T04:00:00Z','large-p0',meal,0,0,'men',null,null,null).all();
    assert.equal(r.results[0].reason,key==='load-duplicate'?'already_scanned':'admitted');
    assert.ok(r.meta.rows_read<100,JSON.stringify(r.meta));assert.ok(r.meta.rows_written<=10,JSON.stringify(r.meta));scans.push(r.meta);
  }
@@ -409,6 +409,20 @@ test('Cloudflare: large history keeps scan and summary costs bounded; tour reads
  const poll=await offlineData(q,new URL(`https://x/?cards=${full.cardCursor}&admissions=${full.admissionCursor}&date=2026-10-21`),{date:'2026-10-21'},'base64');
  assert.equal(poll.cards.length,0);assert.equal(poll.admissions.length,0);assert.equal(poll.tours,undefined);
  const pollReads=reads.splice(0).reduce((a,b)=>a+b,0);assert.ok(pollReads<20,String(pollReads));
+ // A tour number typed for a card with no number reads only that tour's people, through people_sticker. When the guest
+ // it was counted for scans their own card, the meal moves to another guest of the tour at a similar cost.
+ const byTour=await f.db.prepare(SCAN_SQL).bind('load-tour','2026-10-21','2026-10-21T10:00:00Z','','lunch',0,0,'men','123','unknown_number','123').all();
+ assert.deepEqual([byTour.results[0].reason,byTour.results[0].person_id,byTour.results[0].by_tour],['admitted','large-p2479',1]);
+ assert.ok(byTour.meta.rows_read<200,JSON.stringify(byTour.meta));
+ const own=await f.db.prepare(SCAN_SQL).bind('load-own','2026-10-21','2026-10-21T10:01:00Z','large-p2479','lunch',0,0,'men',null,null,null).all();
+ assert.deepEqual([own.results[0].reason,own.results[0].by_tour],['admitted',null]);
+ assert.ok(own.meta.rows_read<300&&own.meta.rows_written<=15,JSON.stringify(own.meta));
+ assert.deepEqual((await f.db.prepare("SELECT person_id,by_tour FROM admissions WHERE date='2026-10-21' AND meal='lunch' AND person_id LIKE 'large-p24%' ORDER BY person_id").all()).results,
+  [{person_id:'large-p2478',by_tour:1},{person_id:'large-p2479',by_tour:0}]);
+ // The next poll carries the guest's own meal as new, and today's tour-number meals in full, read through their index.
+ const after=await offlineData(q,new URL(`https://x/?cards=${full.cardCursor}&admissions=${full.admissionCursor}&date=2026-10-21`),{date:'2026-10-21'},'base64');
+ assert.deepEqual([after.admissions,after.tourAdmissions],[[['large-p2479','lunch']],[['large-p2478','lunch']]]);
+ const tourPollReads=reads.splice(0).reduce((a,b)=>a+b,0);assert.ok(tourPollReads<20,String(tourPollReads));
  // Public status checks are safe even if the database binding would throw on any I/O.
  const {respond}=await import('../cloudflare/worker.js');
  const status=await respond(new Request('https://mawayid.test/api/service'),{...config,DB:{prepare(){throw Error('Unexpected D1 read');}}},()=>new Date('2026-10-21T04:00:00Z'));
@@ -422,9 +436,9 @@ test('Cloudflare: migration backfills legacy scans without altering logs or meal
  await f.db.prepare(`INSERT INTO scan_logs(request_key,date,meal,reason,scanned_at) VALUES('legacy1','2026-10-20',NULL,'admitted','x'),('legacy2','2026-10-20',NULL,'admitted','x'),('declined','2026-10-20',NULL,'unknown_card','x')`).run();
  const before=(await f.db.prepare('SELECT * FROM scan_logs').all()).results;
  for(const file of MIGRATIONS.slice(3))await f.db.batch(statements(file).map(sql=>f.db.prepare(sql)));
- // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner and 0008 the typed card
- // number, both NULL for earlier scans.
- assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null,typed_code:null})));
+ // 0005 only adds the offline flag, which is 0 for every earlier scan; 0006 adds the scanner, 0008 the typed card
+ // number and 0009 the tour-number mark, all NULL for earlier scans.
+ assert.deepEqual((await f.db.prepare('SELECT * FROM scan_logs').all()).results,before.map(r=>({...r,offline:0,gate:null,typed_code:null,by_tour:null})));
  const counts=(await f.call('/summary?date=2026-10-20')).data;
  const {gates,...totals}=counts;
  assert.deepEqual(totals,{date:'2026-10-20',breakfast:0,lunch:0,dinner:0,other:2,scans:2});

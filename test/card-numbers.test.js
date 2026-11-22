@@ -52,7 +52,7 @@ test('printing numbers each card, and a typed number is checked exactly like tha
     assert.equal((await typed(f, '013205')).body.reason, 'already_scanned');
     // A number nobody holds is red at lunch; breakfast lets everyone in without counting them.
     const unknown = await typed(f, '093205');
-    assert.deepEqual([unknown.body.status, unknown.body.reason, unknown.body.message, unknown.body.typed_code], ['red', 'unknown_number', 'No card has this number. Check the number, or scan the QR code', '093205']);
+    assert.deepEqual([unknown.body.status, unknown.body.reason, unknown.body.message, unknown.body.typed_code], ['red', 'unknown_number', 'No card or tour has this number. Check the number, or scan the QR code', '093205']);
     assert.equal((await typed(f, '019999')).body.reason, 'unknown_number');
     f.setTime('2026-10-22T04:00:00Z');
     assert.deepEqual([(await typed(f, '093205')).body.reason, (await typed(f, '093205')).body.status], ['breakfast_unlisted', 'green']);
@@ -60,8 +60,9 @@ test('printing numbers each card, and a typed number is checked exactly like tha
     // The stay's dates still apply.
     f.setTime('2026-10-24T10:00:00Z');
     assert.deepEqual([(await typed(f, '033205')).body.reason, (await typed(f, '033205')).body.status], ['after_departure', 'red']);
-    // Something that is not a card number is refused outright.
-    for (const bad of ['', 'abc', '12', 3205, '005253']) assert.equal((await typed(f, bad)).status, 400, String(bad));
+    // Something that is neither a card number nor a tour number is refused outright; a tour number nobody has is red.
+    for (const bad of ['', 'abc', '1/3205', '26/32/05', 3205]) assert.equal((await typed(f, bad)).status, 400, String(bad));
+    for (const none of ['12', '005253']) assert.equal((await typed(f, none)).body.reason, 'unknown_number', none);
     // The scan log marks typed scans.
     const log = (await f.admin.get('/api/logs?date=2026-10-21').expect(200)).body;
     assert.deepEqual(log.filter(r => r.typed_code).map(r => r.typed_code).sort(), ['013205', '019999', '023205', '023205', '093205'], 'typed with spaces, kept as digits');
@@ -137,5 +138,62 @@ test('a number typed on an offline phone is sent later and checked as at the tim
     assert.equal((await typed(f, '023205', { requestKey: key, offlineAt: '2026-10-21T04:10:00Z', offlineStatus: 'green' })).body.replayed, true);
     assert.equal((await typed(f, '013205', { offlineAt: '2026-10-21T04:15:00Z', offlineStatus: 'red' })).body.reason, 'offline_declined');
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM admissions WHERE meal='breakfast'").get().n, 1);
+  } finally { f.close(); }
+});
+
+// Cards printed before card numbers existed have no number under the QR; staff typed 01 and the tour number, which is
+// guest 01's card, so it showed ALREADY SCANNED while the card in hand went green by QR. Only the tour number is typed now.
+test('a card with no number is checked by its tour number, capped at PAX, and its own QR still goes green later', async () => {
+  const f = await fixture(); try {
+    const t = await tour(f, 3), { cards } = await issue(f, t.id), meals = () => f.db.prepare("SELECT p.person_no,a.by_tour FROM admissions a JOIN people p ON p.id=a.person_id WHERE a.meal='lunch' ORDER BY p.person_no").all().map(r => [r.person_no, r.by_tour]);
+    f.setTime('2026-10-21T10:00:00Z');
+    // Each tour number typed counts one guest who has not eaten, highest card number first.
+    const first = await typed(f, '3205', { gate: 'women' });
+    assert.deepEqual([first.body.status, first.body.reason, first.body.by_tour, first.body.person_no, first.body.typed_code, first.body.message],
+      ['green', 'admitted', 1, 3, '3205', 'Welcome — meal allowed']);
+    assert.equal((await typed(f, '26/3205')).body.person_no, 2, 'with the year too');
+    assert.deepEqual(meals(), [[2, 1], [3, 1]]);
+    // Guest 03's own card is not turned away: the tour-number meal moves to guest 01, who has not eaten.
+    const own = await scan(f, cards[2].token);
+    assert.deepEqual([own.body.status, own.body.reason], ['green', 'admitted']);
+    assert.deepEqual(meals(), [[1, 1], [2, 1], [3, 0]]);
+    // Every guest has now been counted: the tour number is red, and so is any card of the tour, never more than PAX.
+    const full = await typed(f, '3205');
+    assert.deepEqual([full.body.status, full.body.reason, full.body.message, full.body.by_tour], ['red', 'tour_full', 'Every guest of this tour has already had this meal', 1]);
+    for (const card of [cards[0], cards[1], cards[2]]) assert.equal((await scan(f, card.token)).body.reason, 'already_scanned');
+    assert.equal((await typed(f, '013205')).body.reason, 'already_scanned', 'a full card number is still that guest’s card');
+    assert.equal(f.db.prepare("SELECT lunch FROM daily_scan_counts WHERE date='2026-10-21'").get().lunch, 3);
+    // A tour number with no stay today is unknown; one that is also a card number is checked as the card.
+    assert.equal((await typed(f, '9999')).body.reason, 'unknown_number');
+    // Breakfast lets everyone in and counts each guest once.
+    f.setTime('2026-10-22T04:00:00Z');
+    const breakfast = [];for (let i = 0; i < 4; i++) breakfast.push((await typed(f, '3205')).body);
+    assert.deepEqual(breakfast.map(b => [b.status, b.reason]), [['green', 'admitted'], ['green', 'admitted'], ['green', 'admitted'], ['green', 'breakfast_repeat']]);
+    assert.equal(f.db.prepare("SELECT breakfast FROM daily_scan_counts WHERE date='2026-10-22'").get().breakfast, 3);
+    // After the stay the tour number matches nobody.
+    f.setTime('2026-10-24T10:00:00Z');
+    assert.equal((await typed(f, '3205')).body.reason, 'unknown_number');
+    // The scan log and archive tell a tour number from a card number.
+    const log = (await f.admin.get('/api/logs?date=2026-10-21').expect(200)).body;
+    assert.deepEqual(log.filter(r => r.by_tour).map(r => [r.typed_code, r.reason]).reverse(), [['3205', 'admitted'], ['26/3205', 'admitted'], ['3205', 'tour_full']]);
+    assert.equal(log.find(r => r.typed_code === '9999').by_tour, null, 'a tour number nobody is staying under is just unknown');
+  } finally { f.close(); }
+});
+
+test('a tour number reaches only staying guests of that tour number within PAX, across stays under the same tour ID', async () => {
+  const f = await fixture(); try {
+    const t = await tour(f, 2), { cards } = await issue(f, t.id);
+    // Lost cards added under the same tour ID while it is staying continue the numbers (guest 03), and count as the tour.
+    const extra = (await f.admin.post('/api/tours').send({ tour_id: '26/3205', pax: 1, arrival: '2026-10-21', departure: '2026-10-21' }).expect(201)).body;
+    const added = (await issue(f, extra.id)).cards;
+    assert.deepEqual(numbers(added), ['033205']);
+    f.setTime('2026-10-21T10:00:00Z');
+    const picked = [];for (let i = 0; i < 3; i++) picked.push((await typed(f, '3205')).body.person_id);
+    assert.deepEqual(picked, [added[0].person_id, cards[1].person_id, cards[0].person_id]);
+    assert.equal((await typed(f, '3205')).body.reason, 'tour_full');
+    // The next day the added one-day stay has ended, so only the two guests of the main stay remain.
+    f.setTime('2026-10-22T10:00:00Z');
+    const next = [];for (let i = 0; i < 3; i++) next.push((await typed(f, '3205')).body.reason);
+    assert.deepEqual(next, ['admitted', 'admitted', 'tour_full']);
   } finally { f.close(); }
 });
