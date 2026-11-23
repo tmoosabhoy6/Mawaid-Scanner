@@ -15,17 +15,14 @@ const MOVABLE = `(EXISTS(SELECT 1 FROM admissions a WHERE a.person_id=p.id AND a
  AND EXISTS(${freeGuestSql('p.sticker_tour', '?2', '?5')}))`;
 // Some stay with this tour number is staying today, so a tour number with no guest left has simply been fully served.
 const TOUR_STAYING = 'EXISTS(SELECT 1 FROM people p3 CROSS JOIN tours t3 ON t3.id=p3.tour_id WHERE p3.sticker_tour=?11 AND t3.active=1 AND t3.arrival<=?2 AND t3.departure>=?2)';
-// A tour is in Karbala on a date when some record besides the card's own stay says so: another active stay under the
-// same tour ID covers the date, or NKERP (read every ten minutes, src/nkerp.js) has a Karbala visit of the tour that
-// covers it. A card whose own stay is switched off, has not started or has ended is still let in then: the guest is a
-// guest of a tour that is here, and only the app's dates for that stay are wrong (a Sheet sync that has stopped, a
-// card printed for the tour's other visit, a stay added by hand with the wrong dates). key is the tour ID expression;
-// date the service date. Evaluated only for a card that would otherwise be turned away for its dates.
-export const tourHereSql = (key, date) => `(EXISTS(SELECT 1 FROM tours t4 WHERE (t4.tour_id=${key} OR t4.shared_tour_id=${key})
- AND t4.active=1 AND t4.arrival<=${date} AND t4.departure>=${date})
- OR EXISTS(SELECT 1 FROM settings s4,json_each(s4.value,'$.visits') v4 WHERE s4.key='nkerp'
- AND ${key} IN (json_extract(v4.value,'$[0]'),substr(json_extract(v4.value,'$[0]'),4))
- AND substr(json_extract(v4.value,'$[1]'),1,10)<=${date} AND json_extract(v4.value,'$[2]')>=${date}))`;
+// A tour is in Karbala on a date when another active stay under the same tour ID covers it. A card whose own stay is
+// switched off, has not started or has ended is still let in then: the guest belongs to a tour that is here, and only
+// the dates of the stay on the card are wrong (a card printed for the tour's other visit, a stay added by hand with the
+// wrong dates). NKERP is not consulted here: it is used only to move a Sheet stay off a late Pehli onto the day the tour
+// actually reached Karbala, which changes the stay's own arrival (src/nkerp.js). key is the tour ID expression; date
+// the service date. Evaluated only for a card that would otherwise be turned away for its dates.
+export const tourHereSql = (key, date) => `EXISTS(SELECT 1 FROM tours t4 WHERE (t4.tour_id=${key} OR t4.shared_tour_id=${key})
+ AND t4.active=1 AND t4.arrival<=${date} AND t4.departure>=${date})`;
 const HERE = tourHereSql('COALESCE(t.tour_id,t.shared_tour_id)', '?2');
 // Executed as a single statement; admission and daily counters commit with the log.
 // ?6 marks a scan checked on a phone without a connection and sent later; ?7 says that phone showed red,

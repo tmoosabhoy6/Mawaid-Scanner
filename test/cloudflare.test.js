@@ -613,26 +613,22 @@ test('Cloudflare: without NKERP secrets the job does nothing and Sheet arrivals 
 });
 
 // Guests turned away live (20–23 November 2026) although their tour was in Karbala; see test/false-red.test.js.
-test('Cloudflare: a guest is let in while NKERP or another stay of the tour puts it in Karbala; mistyped numbers are found',async()=>{
+test('Cloudflare: a guest is let in while another stay of the tour puts it in Karbala; mistyped numbers are found',async()=>{
  const f=await fixture();try{
  const december=await f.tour(3,{tour_id:'26/3449',arrival:'2026-12-17',departure:'2026-12-22'});await f.issue(december.id);
  const typed=number=>f.call('/scan',{number,requestKey:randomUUID()},'scanner');
  f.setTime('2026-10-22T10:00:00Z');
- assert.equal((await typed('013449')).data.reason,'before_arrival');
+ // NKERP having the tour here is not enough: it is used only to move a stay off a late Pehli.
  await f.db.prepare("INSERT INTO settings(key,value) VALUES('nkerp',?)").bind(JSON.stringify({visits:[['26/3449','2026-10-20T15:10','2026-10-24']]})).run();
- assert.deepEqual([(await typed('013449')).data.status,(await typed('023449')).data.reason],['green','admitted']);
+ assert.equal((await typed('013449')).data.reason,'before_arrival');
  // The leading zero left off: 23500 for card 023500, of a stay covering the day.
  const current=await f.tour(2,{tour_id:'26/3500'});await f.issue(current.id);
  const r=await typed('23500');assert.deepEqual([r.data.status,r.data.reason,r.data.typed_code],['green','admitted','23500']);
  assert.equal((await typed('023500')).data.reason,'already_scanned');
- await f.db.prepare('UPDATE tours SET active=0 WHERE id=?').bind(december.id).run();
- assert.equal((await typed('033449')).data.reason,'admitted');
  f.setTime('2026-10-25T10:00:00Z');
- assert.equal((await typed('013449')).data.reason,'inactive_tour');
- // Another active stay under the same tour ID covering the day lets the December card in too.
- await f.db.prepare('UPDATE tours SET active=1 WHERE id=?').bind(december.id).run();
+ // Another active stay under the same tour ID covering the day lets the December card in.
  await f.call('/tours',{tour_id:'26/3449',office:'',arrival:'2026-10-25',departure:'2026-10-27',pax:1});
- assert.equal((await typed('023449')).data.reason,'admitted');
+ assert.deepEqual([(await typed('013449')).data.status,(await typed('023449')).data.reason],['green','admitted']);
  const stay=(await f.call('/scanner/data',undefined,'scanner')).data.tours.find(t=>t[0]===december.id);
  assert.deepEqual(stay[5],[['2026-10-25','2026-10-27'],['2026-12-17','2026-12-22']]);
  }finally{await f.close();}
@@ -644,4 +640,90 @@ test('Cloudflare: the Apps Script reports a sync it could not finish, and Settin
  assert.equal((await f.call('/sync/error',{message:'Source columns do not match the arrival/departure headers'},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}})).status,200);
  assert.match((await f.call('/settings')).data.syncError.message,/^Google Sheet: Source columns do not match/);
  }finally{await f.close();}
+});
+
+// The whole path a late arrival takes, with the real scanner page (public/app.js) on a phone that is offline at the gate:
+// the Sheet places the tour on the next day's Pehli, the ten-minute job reads NKERP on the server and moves the stay to
+// the day it reached Karbala, the phone's minute poll brings the moved day into its own copy, and that copy lets the
+// guests in at dinner with no connection. The phone never contacts NKERP.
+test('Cloudflare: a late arrival moved off the next day’s Pehli eats dinner on an offline phone, from the phone’s own copy',async()=>{
+ const visit={Id:1,TourId:2,ArrivalDate:'2026-11-20T20:45:00',DepartureDate:'2026-11-25T08:00:00',Tour:{ReferenceNo:'NKERP/TOUR/2026/2291',PaxCount:3}};
+ const nkerpCalls=[];
+ const nkerp=async request=>{
+  const path=new URL(request.url).pathname;nkerpCalls.push(path);
+  if(path.endsWith('/api/accounts/Login'))return Response.json({ReturnStatus:true,IsAuthenicated:true,UserId:77,Role:'13'},{headers:{'Set-Cookie':'.ASPXAUTH=abc; path=/'}});
+  if(path.includes('GetSectionIdByGroupId'))return Response.json({});
+  const rows=path.endsWith('getReleasedTours')?[visit]:[];return Response.json({lstMufiquaFinalInZSDTO:rows,TotalRows:rows.length});
+ };
+ const f=await fixture({NKERP_LOGIN_ID:'id',NKERP_PASSWORD:'pw'},MIGRATIONS,nkerp);let dom;try{
+ let now='2026-11-20T10:00:00Z';const at=value=>{now=value;f.setTime(value);};at(now);
+ // 1. The Sheet lists 26/2291 on 21 November's Pehli; its cards are printed.
+ const source={spreadsheetId:'12JRDK0EmTyO7d07FsOEtp1VHvZg2WGO2HrVLcENEWUE',tab:'Tours'};
+ assert.equal((await f.call('/sync/tours',{...source,tours:[{tour_id:'26/2291',office:'FH Mumbai',arrival:'2026-11-21',departure:'2026-11-25',pax:3}]},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}})).status,200);
+ const stay=(await f.call('/tours?date=')).data.find(t=>t.tour_id==='26/2291');const {cards}=await f.issue(stay.id);
+ // 2. A gate phone opens the scanner (the real page) and keeps its own copy of the cards and stays.
+ const html=readFileSync('public/index.html','utf8'),js=readFileSync('public/app.js','utf8'),phoneRequests=[];let offline=false;
+ dom=new JSDOM(html,{url:'https://mawayid.test/scanner',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window,d=w.document;
+ w.Date=class extends Date{constructor(...args){super(...(args.length?args:[now]));}};
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options={})=>{
+  const target=new URL(url,w.location.href);phoneRequests.push(target.href);
+  if(offline)throw new TypeError('Failed to fetch');
+  if(options.method==='HEAD')return{ok:false,status:404,headers:{get:()=>null}};
+  const res=await f.mf.dispatchFetch(target.href,{method:options.method||'GET',headers:{...(options.headers||{}),'X-Test-Time':now},body:options.body});
+  const body=await res.text();return{ok:res.ok,status:res.status,json:async()=>JSON.parse(body)};
+ };
+ w.HTMLDialogElement.prototype.showModal=function(){};w.eval(js);
+ const waitFor=async(fn,what)=>{for(let n=0;n<300;n++){if(fn())return;await new Promise(r=>setTimeout(r,10));}throw new Error(`timed out: ${typeof what==='function'?what():what}`);};
+ const copy=()=>JSON.parse(w.localStorage.getItem('mawaidScannerData')||'null');
+ await waitFor(()=>copy()?.tours?.[stay.id],'first download');
+ assert.deepEqual(copy().tours[stay.id].slice(0,2),['2026-11-21','2026-11-25'],'the Sheet’s Pehli, before NKERP is read');
+ assert.equal(Object.keys(copy().cards).length,3);
+ const shown=()=>d.querySelector('#scanResult');
+ const check=async(value,typed=false)=>{
+  shown().className='scan-result';
+  if(typed){d.querySelector('#cardNumber').value=value;d.querySelector('#numberScan').dispatchEvent(new w.Event('submit',{cancelable:true}));}
+  else{d.querySelector('#manualCode').value=value;d.querySelector('#manualScan').dispatchEvent(new w.Event('submit',{cancelable:true}));}
+  await waitFor(()=>/green|red/.test(shown().className),()=>`scan result for ${value}: "${shown().className}" ${shown().textContent}`);const result=[shown().className.includes('green')?'green':'red',shown().textContent];
+  await new Promise(r=>setTimeout(r,1900));return result;
+ };
+ // 3. Without the NKERP move this is the bug: offline at dinner on the arrival evening, the phone's copy says tomorrow.
+ at('2026-11-20T16:00:00Z');offline=true;
+ const before=await check(`MW1:${cards[0].token}`);
+ assert.equal(before[0],'red');assert.match(before[1],/Arrival date has not started.*Checked offline/);
+ // 4. The server's ten-minute job reads NKERP (8:45 pm arrival) and moves the stay to 20 November.
+ offline=false;at('2026-11-20T17:00:00Z');
+ await (await f.mf.getWorker()).scheduled({scheduledTime:new Date(now),cron:'*/10 * * * *'});
+ assert.equal((await f.db.prepare('SELECT arrival FROM tours WHERE id=?').bind(stay.id).first()).arrival,'2026-11-20');
+ // 5. The phone's next minute poll (here: the page coming back into view) brings the moved day into its copy.
+ d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>copy().tours[stay.id][0]==='2026-11-20','moved arrival on the phone');
+ assert.deepEqual(copy().tours[stay.id].slice(0,4),['2026-11-20','2026-11-25',3,1]);
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0,'earlier offline scan sent');
+ // 6. The Wi-Fi drops again. The guests arrive at 9:00 pm Karbala time and are checked from the phone's copy alone:
+ // the card that was turned away earlier, another by QR, and the third by its typed card number.
+ // (A USB scanner's repeat of the same code within 3 s is ignored, so the guest turned away earlier comes back later.)
+ await new Promise(r=>setTimeout(r,3100));
+ at('2026-11-20T18:00:00Z');offline=true;
+ const sent=phoneRequests.length;
+ for(const [value,typed] of [[`MW1:${cards[0].token}`,false],[`MW1:${cards[1].token}`,false],['032291',true]]){
+  const [color,text]=await check(value,typed);assert.equal(color,'green',text);assert.match(text,/ALLOW.*Checked offline/);
+ }
+ // A second scan of the same card at the same dinner is still caught offline.
+ await new Promise(r=>setTimeout(r,3100));
+ const repeat=await check(`MW1:${cards[1].token}`);assert.equal(repeat[0],'red');assert.match(repeat[1],/ALREADY SCANNED/);
+ assert.equal(JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length,4);
+ assert.ok(phoneRequests.slice(sent).every(u=>u.startsWith('https://mawayid.test/')),'offline checks made no request anywhere else');
+ // 7. Back online: the phone sends its scans and the server records the three dinners, each against the right guest.
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0,'offline scans sent');
+ const logs=(await f.db.prepare('SELECT person_no,date,meal,reason,offline,typed_code FROM scan_logs ORDER BY id').all()).results.map(r=>[r.person_no,r.date,r.meal,r.reason,r.offline,r.typed_code]);
+ assert.deepEqual(logs,[[1,'2026-11-20','dinner','offline_declined',1,null],[1,'2026-11-20','dinner','admitted',1,null],[2,'2026-11-20','dinner','admitted',1,null],
+  [3,'2026-11-20','dinner','admitted',1,'032291'],[2,'2026-11-20','dinner','already_scanned',1,null]]);
+ assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM admissions WHERE date='2026-11-20' AND meal='dinner'").first()).n,3);
+ // The phone only ever talked to the app; NKERP was read by the server job alone.
+ assert.ok(phoneRequests.length>0&&phoneRequests.every(u=>u.startsWith('https://mawayid.test/')),phoneRequests.find(u=>!u.startsWith('https://mawayid.test/')));
+ assert.ok(!phoneRequests.some(u=>/najafkarbala|NKERP/i.test(u)));assert.ok(nkerpCalls.length>0);
+ }finally{dom?.window.close();await f.close();}
 });

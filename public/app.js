@@ -429,7 +429,7 @@ function applyOfflineData(data){
   if(!Array.isArray(data.cards))return;
   const d=data.full||!offlineData||offlineData.hash!==data.hash||offlineData.v!==OFFLINE_VERSION?{v:OFFLINE_VERSION,hash:data.hash,cards:{},tours:{},served:{},tourServed:{},servedDate:data.date}:offlineData;
   if(data.full)d.cards={};
-  // here: the date ranges in which the stay's tour is in Karbala by another record (src/offline.js).
+  // here: the date ranges in which the stay's tour is in Karbala by another of its stays (src/offline.js).
   if(data.tours){d.tours={};for(const [id,arrival,departure,pax,active,here] of data.tours)d.tours[id]=[arrival,departure,pax,active,Array.isArray(here)?here:[]];}
   // Each card: person, stay, person number, replaced, and the card number printed under its QR (sticker number, tour number).
   for(const [hash,person,tour,no,revoked,stickerNo,stickerTour] of data.cards){

@@ -43,26 +43,17 @@ test('a stay added by hand with the wrong dates is let in while its tour ID’s 
   } finally { f.close(); }
 });
 
-test('NKERP’s Karbala visit lets a guest in when the app’s stay has the wrong dates or was switched off (26/3449)', async () => {
+test('NKERP is used only to move a stay off a late Pehli: a visit alone does not let in another stay’s card', async () => {
   const f = await fixture(); try {
-    // The app only knows the December stay; NKERP has the tour in Karbala now (the Sheet sync had stopped).
+    // The app only knows the December stay; NKERP has the tour in Karbala now. That is not a Pehli move, so the card
+    // keeps its own dates, on the server and on the phones.
     const december = sheetStay(f, '26/3449', '2026-12-17', '2026-12-22', 3), { cards } = await issue(f, december);
+    nkerp(f, [['26/3449', '2026-10-20T15:10', '2026-10-24']]);
     f.setTime('2026-10-22T10:00:00Z');
-    assert.equal((await scan(f, cards[0].token)).body.reason, 'before_arrival', 'no record puts the tour here yet');
-    nkerp(f, [['26/3449', '2026-10-20T15:10', '2026-10-24'], ['26/9999', '2026-10-01T10:00', '2026-10-30']]);
-    assert.deepEqual([(await scan(f, cards[0].token)).body.status, (await scan(f, cards[1].token)).body.reason], ['green', 'admitted']);
-    // A stay switched off is let in too while NKERP has the tour here.
-    f.db.prepare('UPDATE tours SET active=0 WHERE id=?').run(december);
-    assert.equal((await scan(f, cards[2].token)).body.reason, 'admitted');
-    // After NKERP's departure the card is red again, with the card's own reason.
-    f.setTime('2026-10-25T10:00:00Z');
-    assert.equal((await scan(f, cards[0].token)).body.reason, 'inactive_tour');
-    // Phones get the same ranges for their offline check, without any tour ID.
-    f.setTime('2026-10-22T10:00:00Z');
-    f.db.prepare('UPDATE tours SET active=1 WHERE id=?').run(december);
+    assert.equal((await scan(f, cards[0].token)).body.reason, 'before_arrival');
     const data = (await f.scanner.get('/api/scanner/data').expect(200)).body, stay = data.tours.find(t => t[0] === december);
-    assert.deepEqual(stay.slice(1), ['2026-12-17', '2026-12-22', 3, 1, [['2026-12-17', '2026-12-22'], ['2026-10-20', '2026-10-24']]]);
-    assert.doesNotMatch(JSON.stringify(data), /26\/3449|9999|FH Karachi/);
+    assert.deepEqual(stay.slice(1), ['2026-12-17', '2026-12-22', 3, 1, [['2026-12-17', '2026-12-22']]]);
+    assert.doesNotMatch(JSON.stringify(data), /26\/3449|FH Karachi/, 'no tour IDs or offices reach the phones');
   } finally { f.close(); }
 });
 
