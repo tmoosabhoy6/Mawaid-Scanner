@@ -1,6 +1,6 @@
 import { serviceAt, validateTour, validateSafari, EXISTING_TOUR_SQL, MISSING_OFFICE, tourIdSql, TIME_ZONE, START_DATE } from '../src/rules.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry, tourParam } from '../src/scan-query.js';
-import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from '../src/sticker.js';
+import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour, looseTyped, currentTyped } from '../src/sticker.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from '../src/summary.js';
 import { offlineData } from '../src/offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from '../src/sync-plan.js';
@@ -72,6 +72,8 @@ export async function handleRequest(request,env,clock=()=>new Date()){
   return json({role:'admin'},200,{'Set-Cookie':`mawayid_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${url.protocol==='https:'?'; Secure':''}`});
  }
  if(path==='/api/sync/config'&&method==='GET'){await requireSync(request,env);return json({...await getSetting(db,'source',DEFAULT_SOURCE),requestedAt:await getSetting(db,'syncRequestedAt',null),lastSuccess:(await getSetting(db,'sync',null))?.lastSuccess||null});}
+ // The Apps Script reports a sync it could not finish, so Settings shows why the Sheet stopped reaching the app.
+ if(path==='/api/sync/error'&&method==='POST'){await requireSync(request,env);const body=await boundedBody(request,4096);await settingStmt(db,'syncError',{at:stamp,message:`Google Sheet: ${String(body?.message||'the Apps Script stopped with an error.').slice(0,500)}`}).run();return json({ok:true});}
  if(path==='/api/sync/tours'&&method==='POST'){
   await requireSync(request,env);
   // A refused sync is kept for Settings, so a Sheet that stops reaching the app does not go unnoticed.
@@ -194,7 +196,9 @@ async function scan(db,body,now){
  // A typed card number finds its card, which is then checked exactly like that card's QR (see src/sticker.js).
  // Card numbers are only ever added, never changed, so finding the card first cannot race the scan below.
  // A number that is no card's is tried as a tour number, for a card printed without a number (see src/scan-query.js).
- const found=entry.cardNumber?typedCard(await all(db,TYPED_SQL,...typedParams(typed)),service.date):typed?{hash:'',miss:'unknown_number'}:{hash:code.startsWith('MW1:')?await hash(code.slice(4)):'',miss:null};
+ let found=entry.cardNumber?typedCard(await all(db,TYPED_SQL,...typedParams(typed)),service.date):typed?{hash:'',miss:'unknown_number'}:{hash:code.startsWith('MW1:')?await hash(code.slice(4)):'',miss:null};
+ // A number that is no card's may be a card number with its leading zero left off or doubled (see looseTyped).
+ if(found.miss==='unknown_number')for(const alt of looseTyped(typed)){const pick=currentTyped(await all(db,TYPED_SQL,...typedParams(alt)),service.date);if(pick){found=pick;break;}}
  // Eligibility, duplicate check, log and admission trigger run atomically on the primary.
  const row=await first(db,SCAN_SQL,body.requestKey,service.date,at.toISOString(),found.hash,service.meal,offlineAt?1:0,offlineAt&&body.offlineStatus==='red'?1:0,gate,typed,found.miss,tourParam(entry,found));
  const result=row||await first(db,'SELECT * FROM scan_logs WHERE request_key=?',body.requestKey);

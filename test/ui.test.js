@@ -637,3 +637,54 @@ test('scanner: a tour number typed for a card with no number, online and offline
  }finally{admin.window.close();}
  }finally{dom?.window.close();f.close();}
 });
+
+// Live, 20–23 November 2026: offline phones turned away guests whose tour was in Karbala. See test/false-red.test.js.
+test('an offline phone lets in a card whose stay has the wrong dates while the tour is here, and finds mistyped numbers',async()=>{
+ const f=await fixture();let dom;try{
+ const t=await tour(f,2);await issue(f,t.id);
+ const december=randomUUID();f.db.prepare("INSERT INTO tours(id,tour_id,office,arrival,departure,pax,source,created_at) VALUES(?,'26/3205','FH Kuwait','2026-12-21','2026-12-26',2,'sheets',?)").run(december,f.getTime().toISOString());
+ const {cards}=await issue(f,december);f.setTime('2026-10-21T10:00:00Z');
+ dom=domFor(f,'/scanner',{signedIn:false});const w=dom.window,d=w.document,online=w.fetch;let offline=false;
+ Object.defineProperty(w.crypto,'subtle',{value:globalThis.crypto.subtle});w.TextEncoder=TextEncoder;
+ w.fetch=async(url,options)=>{if(offline)throw new TypeError('Failed to fetch');return online(url,options);};
+ await waitFor(()=>/4 cards on this phone/.test(d.querySelector('#scannerStatus')?.textContent||''));
+ const shown=()=>d.querySelector('#scanResult'),send=async(code,typed=false)=>{shown().className='scan-result';
+  if(typed){d.querySelector('#cardNumber').value=code;submit(w,d.querySelector('#numberScan'));}else{d.querySelector('#manualCode').value=code;submit(w,d.querySelector('#manualScan'));}
+  await waitFor(()=>/green|red/.test(shown().className));const text=shown().textContent;await new Promise(r=>setTimeout(r,1900));return text;};
+ offline=true;
+ // The December card, while the tour's October stay covers today.
+ assert.match(await send(`MW1:${cards[0].token}`),/ALLOW.*Person 1.*Checked offline/);
+ // 23205 typed for card 023205 (the leading zero left off): the October guest, the one staying today.
+ assert.match(await send('23205',true),/ALLOW.*No\. 23205.*Checked offline/);
+ // A card the phone has but whose stay it has not got cannot be checked offline: let in, checked by the server later.
+ // (Here the stay's dates change so the next list leaves it out, while the phone keeps its cards.)
+ f.db.prepare("UPDATE tours SET arrival='2026-10-19',departure='2026-10-20' WHERE id=?").run(december);
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0&&!JSON.parse(w.localStorage.getItem('mawaidScannerData')).tours[december]);
+ offline=true;
+ assert.match(await send(`MW1:${cards[1].token}`),/ALLOW.*cannot check yet/);
+ offline=false;d.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>JSON.parse(w.localStorage.getItem('mawaidScanQueue')).length===0);
+ assert.deepEqual(f.db.prepare('SELECT reason FROM scan_logs ORDER BY id').all().map(r=>r.reason),['admitted','admitted','admitted']);
+ }finally{dom?.window.close();f.close();}
+});
+
+test('a gate phone reloads itself for a new version once the gate is quiet, and not right after a scan',async()=>{
+ const f=await fixture();const doms=[];try{
+ const t=await tour(f,2),{cards}=await issue(f,t.id);f.setTime('2026-10-21T10:00:00Z');
+ let etag='"v1"';
+ const open=()=>{const dom=domFor(f,'/scanner',{signedIn:false}),w=dom.window,online=w.fetch;doms.push(dom);
+  w.fetch=async(url,options={})=>options.method==='HEAD'?{ok:true,status:200,headers:{get:k=>k==='ETag'?etag:null}}:online(url,options);return w;};
+ const reloading=w=>{try{return w.sessionStorage.getItem('mawaidResumeCamera');}catch{return null;}};
+ // A phone that has just checked a card does not reload yet.
+ const busy=open();await waitFor(()=>busy.document.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ busy.document.querySelector('#manualCode').value=`MW1:${cards[0].token}`;submit(busy,busy.document.querySelector('#manualScan'));
+ await waitFor(()=>busy.document.querySelector('#scanResult').classList.contains('green'));
+ // An idle phone reloads, remembering that its camera was off.
+ const idle=open();await waitFor(()=>idle.document.querySelector('#scanResult')?.textContent.includes('Ready to scan'));
+ etag='"v2"';
+ for(const w of [busy,idle])w.document.dispatchEvent(new w.Event('visibilitychange'));
+ await waitFor(()=>reloading(idle)==='0');
+ assert.equal(reloading(busy),null);
+ }finally{for(const dom of doms)dom.window.close();f.close();}
+});

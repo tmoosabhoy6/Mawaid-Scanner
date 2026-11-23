@@ -1,4 +1,4 @@
-import { typedCandidates, typedDigits, typedTour } from './sticker.js';
+import { typedCandidates, typedDigits, typedTour, looseTyped } from './sticker.js';
 // The guest of tour number `tour` to count for a meal when a card is checked by its tour number: staying on `date` in an
 // active stay, within its PAX, holding a current card and not yet admitted for `meal`. The highest card number goes
 // first. CROSS JOIN keeps SQLite starting from people_sticker, so it reads only the people of that tour number instead
@@ -15,6 +15,18 @@ const MOVABLE = `(EXISTS(SELECT 1 FROM admissions a WHERE a.person_id=p.id AND a
  AND EXISTS(${freeGuestSql('p.sticker_tour', '?2', '?5')}))`;
 // Some stay with this tour number is staying today, so a tour number with no guest left has simply been fully served.
 const TOUR_STAYING = 'EXISTS(SELECT 1 FROM people p3 CROSS JOIN tours t3 ON t3.id=p3.tour_id WHERE p3.sticker_tour=?11 AND t3.active=1 AND t3.arrival<=?2 AND t3.departure>=?2)';
+// A tour is in Karbala on a date when some record besides the card's own stay says so: another active stay under the
+// same tour ID covers the date, or NKERP (read every ten minutes, src/nkerp.js) has a Karbala visit of the tour that
+// covers it. A card whose own stay is switched off, has not started or has ended is still let in then: the guest is a
+// guest of a tour that is here, and only the app's dates for that stay are wrong (a Sheet sync that has stopped, a
+// card printed for the tour's other visit, a stay added by hand with the wrong dates). key is the tour ID expression;
+// date the service date. Evaluated only for a card that would otherwise be turned away for its dates.
+export const tourHereSql = (key, date) => `(EXISTS(SELECT 1 FROM tours t4 WHERE (t4.tour_id=${key} OR t4.shared_tour_id=${key})
+ AND t4.active=1 AND t4.arrival<=${date} AND t4.departure>=${date})
+ OR EXISTS(SELECT 1 FROM settings s4,json_each(s4.value,'$.visits') v4 WHERE s4.key='nkerp'
+ AND ${key} IN (json_extract(v4.value,'$[0]'),substr(json_extract(v4.value,'$[0]'),4))
+ AND substr(json_extract(v4.value,'$[1]'),1,10)<=${date} AND json_extract(v4.value,'$[2]')>=${date}))`;
+const HERE = tourHereSql('COALESCE(t.tour_id,t.shared_tour_id)', '?2');
 // Executed as a single statement; admission and daily counters commit with the log.
 // ?6 marks a scan checked on a phone without a connection and sent later; ?7 says that phone showed red,
 // so the guest was turned away and no meal is recorded even if the card was otherwise valid.
@@ -33,8 +45,9 @@ export const SCAN_SQL = `INSERT INTO scan_logs(request_key,card_id,person_id,tou
   WHEN ?5='breakfast' THEN 'breakfast_unlisted' ELSE COALESCE(?10,'unknown_card') END
  WHEN ?5='breakfast' THEN CASE WHEN ${SERVED} AND NOT ${MOVABLE} THEN 'breakfast_repeat'
   WHEN ?7=1 THEN 'offline_declined' ELSE 'admitted' END
- WHEN t.active=0 THEN 'inactive_tour' WHEN c.revoked_at IS NOT NULL THEN 'replaced_card'
- WHEN ?2<t.arrival THEN 'before_arrival' WHEN ?2>t.departure THEN 'after_departure'
+ WHEN (t.active=0 OR ?2<t.arrival OR ?2>t.departure) AND NOT ${HERE}
+  THEN CASE WHEN t.active=0 THEN 'inactive_tour' WHEN ?2<t.arrival THEN 'before_arrival' ELSE 'after_departure' END
+ WHEN c.revoked_at IS NOT NULL THEN 'replaced_card'
  WHEN p.person_no>t.pax THEN 'over_capacity' WHEN ?5 IS NULL THEN 'outside_meal_time'
  WHEN ${SERVED} AND NOT ${MOVABLE} THEN 'already_scanned'
  WHEN ?7=1 THEN 'offline_declined' ELSE 'admitted' END,?3,?6,?8,?9,CASE WHEN ?11 IS NOT NULL AND (c.id IS NOT NULL OR ${TOUR_STAYING}) THEN 1 END
@@ -65,7 +78,7 @@ export function scanGate(body) {
 export function scanEntry(body) {
   const bad = message => Object.assign(new Error(message), { status: 400 });
   if (body.number !== undefined && body.number !== null) {
-    if (typeof body.number !== 'string' || body.number.length > 30 || (!typedCandidates(body.number).length && !typedTour(body.number))) throw bad('Enter the card number printed under the QR code, such as 015253, or the tour number if the card has none.');
+    if (typeof body.number !== 'string' || body.number.length > 30 || (!typedCandidates(body.number).length && !typedTour(body.number) && !looseTyped(body.number).some(v => typedCandidates(v).length))) throw bad('Enter the card number printed under the QR code, such as 015253, or the tour number if the card has none.');
     const typed = typedDigits(body.number);
     return { code: '', typed, cardNumber: typedCandidates(typed).length > 0, tour: typedTour(typed) };
   }

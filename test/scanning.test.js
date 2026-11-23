@@ -56,7 +56,7 @@ test('gate phones download current cards once, then only what changed',async()=>
  const full=(await f.scanner.get('/api/scanner/data').expect(200)).body;
  assert.equal(full.full,true);assert.equal(full.hash,'hex');assert.equal(full.meal,'breakfast');
  assert.deepEqual(full.cards.map(c=>c[0]).sort(),cards.map(c=>hex(c.token)).sort());
- assert.deepEqual(full.tours,[[t.id,'2026-10-21','2026-10-23',2,1]]);assert.ok(!JSON.stringify(full).includes('FH Kuwait'),'no office names');
+ assert.deepEqual(full.tours,[[t.id,'2026-10-21','2026-10-23',2,1,[['2026-10-21','2026-10-23']]]]);assert.ok(!JSON.stringify(full).includes('FH Kuwait'),'no office names');
  await scan(f,cards[0].token);
  const next=replaceCard(f,cards[0]);
  const poll=(await f.scanner.get(`/api/scanner/data?cards=${full.cardCursor}&admissions=${full.admissionCursor}&date=${full.date}`).expect(200)).body;

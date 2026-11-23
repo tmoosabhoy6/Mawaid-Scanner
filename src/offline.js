@@ -1,3 +1,4 @@
+import { bareTourId } from './rules.js';
 // Gate phones keep a copy of the cards of current stays, so they can keep checking cards when the Wi-Fi drops.
 // The first download holds every current card and today's meals; after that each minute's poll reads only
 // cards and meals added since the phone's cursors. A person whose card was replaced (in the past) has a newer card,
@@ -11,7 +12,12 @@ const CURRENT_TOURS = 'SELECT id FROM tours WHERE departure>=?1';
 export const OFFLINE_SQL = {
   cardCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM cards',
   admissionCursor: 'SELECT COALESCE(MAX(rowid),0) AS n FROM admissions',
-  tours: 'SELECT t.id,t.arrival,t.departure,t.pax,t.active FROM tours t WHERE t.departure>=?1 AND EXISTS(SELECT 1 FROM people p WHERE p.tour_id=t.id)',
+  tours: 'SELECT t.id,t.arrival,t.departure,t.pax,t.active,COALESCE(t.tour_id,t.shared_tour_id) AS tid FROM tours t WHERE t.departure>=?1 AND EXISTS(SELECT 1 FROM people p WHERE p.tour_id=t.id)',
+  // When each tour is in Karbala by another record (see tourHereSql in scan-query.js): its active stays and its NKERP
+  // visits that have not ended. Sent as date ranges per stay, never the tour IDs themselves.
+  stayRanges: 'SELECT COALESCE(tour_id,shared_tour_id) AS tid,arrival,departure FROM tours WHERE active=1 AND departure>=?1 AND COALESCE(tour_id,shared_tour_id) IS NOT NULL ORDER BY arrival',
+  visitRanges: `SELECT json_extract(v.value,'$[0]') AS tid,substr(json_extract(v.value,'$[1]'),1,10) AS arrival,json_extract(v.value,'$[2]') AS departure
+    FROM settings s,json_each(s.value,'$.visits') v WHERE s.key='nkerp' AND json_extract(v.value,'$[2]')>=?1`,
   allCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour
     FROM people p JOIN cards c ON c.person_id=p.id WHERE p.tour_id IN (${CURRENT_TOURS}) AND c.rowid<=?2`,
   newCards: `SELECT c.token_hash,p.id AS person_id,p.tour_id,p.person_no,c.revoked_at IS NOT NULL AS revoked,p.sticker_no,p.sticker_tour
@@ -36,7 +42,11 @@ export async function offlineData(all, url, service, hashFormat) {
     admissions: admissions.map(a => [a.person_id, a.meal]),
     tourAdmissions: (await all(OFFLINE_SQL.tourAdmissions, today)).map(a => [a.person_id, a.meal]) };
   if (withTours) {
-    data.tours = (await all(OFFLINE_SQL.tours, today)).map(t => [t.id, t.arrival, t.departure, t.pax, t.active ? 1 : 0]);
+    const here = new Map(), add = (key, arrival, departure) => { if (!here.has(key)) here.set(key, []); here.get(key).push([arrival, departure]); };
+    for (const r of await all(OFFLINE_SQL.stayRanges, today)) add(r.tid, r.arrival, r.departure);
+    for (const r of await all(OFFLINE_SQL.visitRanges, today)) { add(r.tid, r.arrival, r.departure); add(bareTourId(r.tid), r.arrival, r.departure); }
+    // Each stay: id, arrival, departure, PAX, active, and the date ranges in which its tour is in Karbala.
+    data.tours = (await all(OFFLINE_SQL.tours, today)).map(t => [t.id, t.arrival, t.departure, t.pax, t.active ? 1 : 0, here.get(t.tid) || []]);
   }
   return data;
 }

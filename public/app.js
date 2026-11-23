@@ -394,6 +394,9 @@ function zipBlob(entries){
 function downloadZip(filename,entries){const url=URL.createObjectURL(zipBlob(entries)),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
 /* Gate phones check cards online first. When the Wi-Fi drops they keep checking against a copy of the current
    cards held on the phone, and send those scans to the server once the connection returns. */
+// The scanner's code version (ETag of app.js) when the page opened, and how long the gate must be quiet before the
+// phone reloads itself for a new version (see updateApp in scannerView).
+let scannerVersion=null;const RELOAD_IDLE_MS=45000,RESUME_CAMERA_KEY='mawaidResumeCamera';
 const OFFLINE_DATA_KEY='mawaidScannerData',OFFLINE_QUEUE_KEY='mawaidScanQueue',GATE_KEY='mawaidScannerGate',ONLINE_TIMEOUT=3000;
 // A card check waits 3 s for the server. The background list download is larger, so a slow connection gets longer
 // before the phone treats itself as offline.
@@ -426,7 +429,8 @@ function applyOfflineData(data){
   if(!Array.isArray(data.cards))return;
   const d=data.full||!offlineData||offlineData.hash!==data.hash||offlineData.v!==OFFLINE_VERSION?{v:OFFLINE_VERSION,hash:data.hash,cards:{},tours:{},served:{},tourServed:{},servedDate:data.date}:offlineData;
   if(data.full)d.cards={};
-  if(data.tours){d.tours={};for(const [id,arrival,departure,pax,active] of data.tours)d.tours[id]=[arrival,departure,pax,active];}
+  // here: the date ranges in which the stay's tour is in Karbala by another record (src/offline.js).
+  if(data.tours){d.tours={};for(const [id,arrival,departure,pax,active,here] of data.tours)d.tours[id]=[arrival,departure,pax,active,Array.isArray(here)?here:[]];}
   // Each card: person, stay, person number, replaced, and the card number printed under its QR (sticker number, tour number).
   for(const [hash,person,tour,no,revoked,stickerNo,stickerTour] of data.cards){
     if(!data.full)for(const old of Object.values(d.cards))if(old[0]===person)old[3]=1;
@@ -480,6 +484,16 @@ function typedOffline(d,typed,date){
   const days=r=>Math.abs(Date.parse(date<r.arrival?r.arrival:r.departure)-Date.parse(date));rows.sort((a,b)=>days(a)-days(b));
   return rows.length>1&&days(rows[0])===days(rows[1])?{reason:'ambiguous_number'}:{card:rows[0].card};
 }
+// Mistyped numbers tried when the number as typed is no card's: the leading zero left off (83210 for 083210) or doubled
+// (0193045 for 193045). Mirrors looseTyped and currentTyped in src/sticker.js: only one guest staying today counts.
+const looseTyped=value=>{const digits=typedDigits(value);return /^\d{5,12}$/.test(digits)?[digits.startsWith('0')?digits.slice(1):`0${digits}`]:[];};
+function looseOffline(d,typed,date){
+  for(const alt of looseTyped(typed)){
+    const keys=typedCandidates(alt),current=Object.values(d.cards).filter(c=>!c[3]&&keys.some(k=>c[4]===k.no&&c[5]===k.tour)&&d.tours[c[1]]&&d.tours[c[1]][0]<=date&&date<=d.tours[c[1]][1]);
+    if(new Set(current.map(c=>c[0])).size===1)return {card:current[0]};
+  }
+  return null;
+}
 // A card with no number under its QR: only its tour number is typed, such as 3382 or 26/3382 (src/sticker.js typedTour).
 const typedTour=value=>/^(?:\d{2}\/)?(\d{1,6})$/.exec(typedDigits(value))?.[1]??null;
 // Has this guest had this meal, on the phone's copy? 'tour' when the meal was counted by tour number.
@@ -499,7 +513,9 @@ function freeGuest(d,tour,date,meal,except=null){
 async function checkOffline(entry,now){
   const d=offlineData,service=karbalaService(now,d?.meals),result={date:service.date,meal:service.meal,offline:true};
   const reason=await(async()=>{
-    const breakfast=service.meal==='breakfast',number=entry.number,byNumber=number&&typedCandidates(number).length?typedOffline(d,number,service.date):number?{reason:'unknown_number'}:null;
+    const breakfast=service.meal==='breakfast',number=entry.number;
+    let byNumber=number&&typedCandidates(number).length?typedOffline(d,number,service.date):number?{reason:'unknown_number'}:null;
+    if(byNumber?.reason==='unknown_number')byNumber=looseOffline(d,number,service.date)||byNumber;
     // A number that is no card's is tried as a tour number: a guest of that tour who has not had this meal is counted.
     const tourNo=number&&byNumber.reason==='unknown_number'?typedTour(number):null;
     const found=tourNo?{card:freeGuest(d,tourNo,service.date,service.meal),reason:'unknown_number'}:byNumber||{card:entry.code.startsWith('MW1:')&&d.cards[await sha256(entry.code.slice(4),d.hash)]};
@@ -511,17 +527,20 @@ async function checkOffline(entry,now){
       if(breakfast)return 'breakfast_unlisted';
       // A real card missing from the list was printed after the phone's last update: never turn that guest away.
       if(!card&&!entry.number&&CARD_CODE.test(entry.code))return 'offline_unlisted';
-      // The list holds every stay that has not ended, so a known card without its stay has left.
-      return card?'after_departure':found.reason||'unknown_card';
+      // A known card whose stay is not on this phone's list cannot be checked here either: let the guest in, and the
+      // server checks the card when the scan is sent.
+      return card?'offline_unlisted':found.reason||'unknown_card';
     }
-    const [person,,no,revoked]=card,[arrival,departure,pax,active]=tour,today=d.servedDate===service.date,key=`${person}|${service.meal}`;
+    const [person,,no,revoked]=card,[arrival,departure,pax,active,here=[]]=tour,today=d.servedDate===service.date,key=`${person}|${service.meal}`;
     // A meal counted for this guest by tour number moves to another guest of the tour who has not eaten (as on the server).
     const as=today?servedAs(d,person,service.meal):null,moveTo=as==='tour'?freeGuest(d,card[5],service.date,service.meal,person):null,served=as&&!moveTo;
     Object.assign(result,{person_id:person,person_no:no});if(moveTo)result.moveTo=moveTo[0];
     const first=d.served[key]||d.tourServed?.[key];if(served&&typeof first==='string')result.firstScannedAt=first;
     if(breakfast)return served?'breakfast_repeat':'admitted';
-    if(!active)return 'inactive_tour';if(revoked)return 'replaced_card';
-    if(service.date<arrival)return 'before_arrival';if(service.date>departure)return 'after_departure';
+    // As on the server (tourHereSql), a stay whose dates are wrong does not turn the guest away while the tour is in Karbala.
+    const date=service.date,inKarbala=here.some(([from,to])=>from<=date&&date<=to);
+    if((!active||date<arrival||date>departure)&&!inKarbala)return !active?'inactive_tour':date<arrival?'before_arrival':'after_departure';
+    if(revoked)return 'replaced_card';
     if(no>pax)return 'over_capacity';if(!service.meal)return 'outside_meal_time';
     if(served)return 'already_scanned';
     return 'admitted';
@@ -594,7 +613,20 @@ async function scannerView(){
     try{
       const next=await pollOfflineData();if(currentView!=='scanner')return;connected=true;clearTimeout(retryTimer);service=next;showLink();ready();
       if(scanQueue.length){await sendQueue();if(currentView==='scanner')showLink();}
+      await updateApp();
     }catch{if(currentView==='scanner')goOffline();}
+  };
+  // A gate phone keeps the scanner open for days, so a fix deployed to the server never reached it: it kept checking
+  // cards with the code it opened with. Each minute's poll also asks whether the scanner's code has changed (its ETag),
+  // and once it has, the phone reloads itself at the first quiet moment — no card on screen, nothing waiting to send and
+  // no scan for RELOAD_IDLE_MS — reopening on the same tab and turning the camera back on if it was on.
+  const updateApp=async()=>{
+    let version=null;try{const r=await fetch('/app.js',{method:'HEAD',cache:'no-store'});version=r.ok?r.headers.get('ETag')||r.headers.get('Last-Modified'):null;}catch{}
+    if(!version)return;
+    scannerVersion??=version;
+    if(version===scannerVersion||scannerBusy||scanQueue.length||Date.now()-lastAt<RELOAD_IDLE_MS||currentView!=='scanner')return;
+    try{sessionStorage.setItem(RESUME_CAMERA_KEY,camera?'1':'0');}catch{}
+    location.reload();
   };
   const cameraButton=()=>{$('#startCamera').textContent=camera?'Stop camera':'Start camera';$('#startCamera').classList.toggle('primary',!camera);};
   async function stopScannerCamera(){if(camera){const running=camera;camera=null;try{await running.stop();}catch{}try{running.clear();}catch{}}cameraButton();}
@@ -637,14 +669,17 @@ async function scannerView(){
     setTimeout(()=>{scannerBusy=false;},result.status==='green'?(typed?TYPED_FLASH_MS:GREEN_FLASH_MS):1300);
     readyLater();
   }
-  $('#startCamera').onclick=()=>guard(()=>busy($('#startCamera'),async()=>{
-    unlockAudio();
-    if(camera)return stopScannerCamera();
+  const openCamera=async()=>{
     if(!window.isSecureContext)throw new Error('Camera access requires HTTPS.');if(!window.MawaidCamera)throw new Error('Camera library did not load. Reload the page.');
     const starting=new window.MawaidCamera('reader');
     try{await starting.start({facingMode:'environment'},{fps:20,qrbox:{width:220,height:220}},decoded=>submit(decoded,true),()=>{});}
     catch(err){try{starting.clear();}catch{}throw new Error(/NotAllowed|Permission/i.test(String(err?.name||err))?'Camera access was blocked. Allow the camera for this site in your browser settings, then try again.':'The camera could not start. Close other apps using the camera, or use a USB scanner.');}
     camera=starting;cameraButton();
+  };
+  $('#startCamera').onclick=()=>guard(()=>busy($('#startCamera'),async()=>{
+    unlockAudio();
+    if(camera)return stopScannerCamera();
+    await openCamera();
   }));
   $('#manualScan').onsubmit=ev=>{ev.preventDefault();const input=$('#manualCode');submit(input.value.trim());input.value='';input.focus();};
   // The number box under the camera. A USB scanner that types a QR value into it is checked as that QR.
@@ -657,9 +692,13 @@ async function scannerView(){
     // The keyboard closes, so the full-screen result is not hidden behind it.
     input.blur();
     if(value.startsWith('MW1:'))return submit(value);
-    if(!typedCandidates(value).length&&!typedTour(value)){const detail=`“${value}” is not a card number. Type the digits under the QR, such as 015253, or the tour number if the card has none.`;showResult('red','DO NOT ADMIT',detail);flash(false,'CHECK THE NUMBER',detail);beep(false);readyLater();return;}
+    if(!typedCandidates(value).length&&!typedTour(value)&&!looseTyped(value).some(v=>typedCandidates(v).length)){const detail=`“${value}” is not a card number. Type the digits under the QR, such as 015253, or the tour number if the card has none.`;showResult('red','DO NOT ADMIT',detail);flash(false,'CHECK THE NUMBER',detail);beep(false);readyLater();return;}
     submit(typedDigits(value),false,true);
   };
+  // After reloading for a new version, the camera comes back on by itself if it was on; if the phone asks for camera
+  // permission again, Start camera works as usual.
+  let resume=null;try{resume=sessionStorage.getItem(RESUME_CAMERA_KEY);sessionStorage.removeItem(RESUME_CAMERA_KEY);}catch{}
+  if(resume==='1')openCamera().catch(()=>{});
   await update();
   // Hidden phones make no periodic requests. A phone whose connection returns updates straight away.
   scannerVisibility=()=>{if(!document.hidden)void update();};

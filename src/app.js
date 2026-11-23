@@ -9,7 +9,7 @@ import { makeLabels } from './labels.js';
 import { tourList, safariList, scanLogQuery, gateCountQuery, gateCounts, BATCH_LIST_SQL } from './list-queries.js';
 import { SUMMARY_SQL, GATE_SUMMARY_SQL, summaryWithGates, tourReportQuery } from './summary.js';
 import { SCAN_SQL, FIRST_ADMISSION_SQL, REPEAT_REASONS, GREEN_REASONS, SCAN_REASONS as reasons, offlineTime, scanGate, scanEntry, tourParam } from './scan-query.js';
-import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour } from './sticker.js';
+import { STICKER_BASE_SQL, TYPED_SQL, assignStickers, typedCard, typedParams, stickerTour, looseTyped, currentTyped } from './sticker.js';
 import { offlineData } from './offline.js';
 import { planSync, skippedWarning, heldTourIds, keptStays } from './sync-plan.js';
 import { ARCHIVE_DATASETS, archiveSql, archiveCutoff, archivePage, CLEAR_ROWS, CLEAR_PDFS } from './archive.js';
@@ -176,7 +176,9 @@ export function createApp(options = {}) {
     const result = transaction(db, () => {
       // A typed card number finds its card, which is then checked exactly like that card's QR (see sticker.js).
       // A number that is no card's is tried as a tour number, for a card printed without a number (see scan-query.js).
-      const found = entry.cardNumber ? typedCard(db.prepare(TYPED_SQL).all(...typedParams(typed)), service.date) : typed ? { hash: '', miss: 'unknown_number' } : { hash: code.startsWith('MW1:') ? hash(code.slice(4)) : '', miss: null };
+      let found = entry.cardNumber ? typedCard(db.prepare(TYPED_SQL).all(...typedParams(typed)), service.date) : typed ? { hash: '', miss: 'unknown_number' } : { hash: code.startsWith('MW1:') ? hash(code.slice(4)) : '', miss: null };
+      // A number that is no card's may be a card number with its leading zero left off or doubled (see looseTyped).
+      if (found.miss === 'unknown_number') for (const alt of looseTyped(typed)) { const pick = currentTyped(db.prepare(TYPED_SQL).all(...typedParams(alt)), service.date); if (pick) { found = pick; break; } }
       const row = db.prepare(SCAN_SQL).get(requestKey, service.date, at.toISOString(), found.hash, service.meal, offlineAt ? 1 : 0, offlineAt && req.body.offlineStatus === 'red' ? 1 : 0, gate, typed, found.miss, tourParam(entry, found));
       return row ? { ...row } : { ...db.prepare('SELECT * FROM scan_logs WHERE request_key=?').get(requestKey), replayed: true };
     });
@@ -242,6 +244,12 @@ export function createApp(options = {}) {
     res.json({ ...source(), requestedAt: getSetting('syncRequestedAt',null), lastSuccess: getSetting('sync',null)?.lastSuccess || null });
   });
   app.post('/api/sync/request', auth, (req,res)=>{setSetting('syncRequestedAt',now().toISOString());res.json({ok:true});});
+  // The Apps Script reports a sync it could not finish, so Settings shows why the Sheet stopped reaching the app.
+  app.post('/api/sync/error', (req, res) => {
+    if (!equal(req.headers.authorization || '', `Bearer ${config.syncToken}`)) return res.status(401).json({ error: 'Invalid sync token.' });
+    setSetting('syncError', { at: now().toISOString(), message: `Google Sheet: ${String(req.body?.message || 'the Apps Script stopped with an error.').slice(0, 500)}` });
+    res.json({ ok: true });
+  });
   app.post('/api/sync/tours', (req, res) => {
     if (!equal(req.headers.authorization || '', `Bearer ${config.syncToken}`)) return res.status(401).json({ error: 'Invalid sync token.' });
     // A refused sync is kept for Settings, so a Sheet that stops reaching the app does not go unnoticed.

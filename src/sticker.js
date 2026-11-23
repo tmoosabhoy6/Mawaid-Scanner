@@ -86,6 +86,20 @@ export function assignStickers(cards, bases) {
   }
   return cards;
 }
+// The number as staff often mistype it at a busy gate: the leading zero of a one-digit sticker number left off (83210
+// for 083210) or an extra zero put in front (0193045 for 193045). Only for five digits or more, so a four-digit tour
+// number typed for a card with no number is never read this way. Returns the other readings to try.
+export function looseTyped(value) {
+  const digits = typedDigits(value);
+  if (!TYPED_FORMAT.test(digits) || digits.length < 5) return [];
+  return [digits.startsWith('0') ? digits.slice(1) : `0${digits}`];
+}
+// A mistyped reading is accepted only when exactly one guest holding it is staying on the date, so a slip never checks
+// some other tour's card. Rows of TYPED_SQL. Returns { hash, miss: null } or null.
+export function currentTyped(rows, date) {
+  const current = rows.filter(r => r.token_hash !== null && r.token_hash !== undefined && r.arrival <= date && date <= r.departure);
+  return current.length === 1 ? { hash: current[0].token_hash, miss: null } : null;
+}
 // The card a typed number means on a date, from the rows of TYPED_SQL. Returns { hash } (the card's stored token hash,
 // which the scan then checks exactly like a QR scan of that card) or { hash: '', miss } with why no card was found.
 export function typedCard(rows, date) {

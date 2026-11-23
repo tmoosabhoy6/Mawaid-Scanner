@@ -23,10 +23,14 @@ test('missing or ambiguous departures and mismatched PAX excluded; a row without
  assert.deepEqual(partial.warnings,['26/1: source row 3 has no valid PAX; excluded until it is fixed.','26/3554: source row 4 has no office; excluded until it is fixed.']);
  assert.throws(()=>parse([day('Wednesday, October 21, 2026'),row({arrival:true})]),/headers/);
 });
-test('duplicates coalesce; conflicting duplicates abort; old stays omitted',()=>{
+test('duplicates coalesce; a conflicting duplicate leaves out only its tour; old stays omitted',()=>{
  const arrival=row({arrival:true});
  assert.equal(parse([headers(),day('Sunday, October 18, 2026'),arrival,arrival,day('Monday, October 19, 2026'),row({departure:true})]).tours.length,0);
- assert.throws(()=>parse([headers(),day('Wednesday, October 21, 2026'),arrival,row({arrival:true,pax:10})]),/Conflicting/);
+ // A conflicting duplicate used to stop the whole Sheet syncing; now only that tour waits, with a warning the app
+ // recognises (heldTourIds), and every other tour still syncs.
+ const result=parse([headers(),day('Wednesday, October 21, 2026'),arrival,row({arrival:true,pax:10}),row({arrival:true,id:'26/7'}),day('Thursday, October 22, 2026'),row({departure:true}),row({departure:true,id:'26/7'})]);
+ assert.deepEqual(result.tours.map(t=>t.tour_id),['26/7']);
+ assert.deepEqual(result.warnings,['26/1: conflicting duplicate rows on 2026-10-21 (rows 3 and 4); excluded until it is fixed.']);
 });
 test('historical conflicts and invalid rows do not block a later valid visit by the same tour',()=>{
  const result=parse([headers(),day('Sunday, October 26, 2025'),row({arrival:true,id:'25/4576',pax:7}),row({arrival:true,id:'25/4576',pax:9}),row({arrival:true,id:'25/4577',pax:'bad'}),
@@ -34,9 +38,9 @@ test('historical conflicts and invalid rows do not block a later valid visit by 
  day('Wednesday, October 21, 2026'),row({arrival:true,id:'25/4576',pax:4}),day('Thursday, October 22, 2026'),row({departure:true,id:'25/4576',pax:4})]);
  assert.equal(result.tours.length,1);assert.equal(result.tours[0].pax,4);assert.equal(result.tours[0].arrival,'2026-10-21');assert.equal(result.tours[0].departure,'2026-10-23');
 });
-test('conflicting arrivals before cutoff still block if their actual departure reaches launch',()=>{
- assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),/Conflicting.*rows 3 and 4/);
- assert.throws(()=>parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7}),row({departure:true,pax:9})]),/Conflicting/);
+test('conflicting arrivals before cutoff still leave the tour out if their actual departure reaches launch',()=>{
+ assert.deepEqual(parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]),{tours:[],warnings:['26/1: conflicting duplicate rows on 2026-10-19 (rows 3 and 4); excluded until it is fixed.']});
+ assert.match(parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:7}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7}),row({departure:true,pax:9})]).warnings.join(),/conflicting duplicate/);
  assert.deepEqual(parse([headers(),day('Monday, October 19, 2026'),row({arrival:true,pax:'bad'}),day('Tuesday, October 20, 2026'),row({departure:true,pax:7})]).warnings,['26/1: source row 3 has no valid PAX; excluded until it is fixed.']);
 });
 test('calendar parser rejects impossible dates and source globals are isolated',()=>{
@@ -86,8 +90,8 @@ test('each run reads only recent day blocks, sends a changed Sheet at once, and 
  // Request sync in the app sends on the next run.
  s.later(1);s.config.requestedAt=new Date(Date.parse(s.config.lastSuccess)+1000).toISOString();s.run();assert.equal(s.pushes.length,4);
 });
-test('source row numbers in errors count from where the read started',()=>{
- assert.throws(()=>context.MAWAYID_buildTours([headers(),day('Wednesday, October 21, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Thursday, October 22, 2026'),row({departure:true,pax:7})],context.MAWAYID_CONFIG,101),/rows 103 and 104/);
+test('source row numbers in warnings count from where the read started',()=>{
+ assert.match(context.MAWAYID_buildTours([headers(),day('Wednesday, October 21, 2026'),row({arrival:true,pax:7}),row({arrival:true,pax:9}),day('Thursday, October 22, 2026'),row({departure:true,pax:7})],context.MAWAYID_CONFIG,101).warnings[0],/rows 103 and 104/);
  assert.equal(context.MAWAYID_firstRow([['x'],['Friday, August 8, 2025'],[''],['Sunday, August 23, 2026']],'2026-08-22'),4);
  assert.equal(context.MAWAYID_firstRow([['no dates here']],'2026-08-22'),1);
 });
@@ -102,4 +106,10 @@ test('Wada plus one day includes launch-day departures and calendar rollovers',(
 test('shifted departure cannot overlap another arrival for the same tour',()=>{
  const result=parse([headers(),day('Tuesday, October 20, 2026'),row({arrival:true,departure:true}),day('Wednesday, October 21, 2026'),row({arrival:true}),day('Thursday, October 22, 2026'),row({departure:true})]);
  assert.equal(result.tours.length,1);assert.equal(result.tours[0].arrival,'2026-10-21');assert.match(result.warnings[0],/overlaps/);
+});
+
+test('a sync that fails in Google is reported to the app, so Settings shows why the Sheet stopped (20 November 2026)',()=>{
+ const s=appsScript([day('Wednesday, October 21, 2026'),row({arrival:true})]);
+ assert.throws(()=>s.run(),/headers/);
+ assert.deepEqual(s.pushes,[{message:'Source columns do not match the arrival/departure headers; refusing to change Tours.'}]);
 });

@@ -32,7 +32,22 @@ function MAWAYID_setupTours() {
   for (var i=0; i<triggers.length; i++) if (triggers[i].getHandlerFunction() === 'MAWAYID_refreshTours') ScriptApp.deleteTrigger(triggers[i]);
   ScriptApp.newTrigger('MAWAYID_refreshTours').timeBased().everyMinutes(1).create();
 }
+// Any failure is also sent to the app, so Settings shows why the Sheet stopped syncing instead of only the Apps Script
+// execution log. A sync that stopped silently on 20 November left the app with three-day-old stay dates.
 function MAWAYID_refreshTours(force) {
+  try { return MAWAYID_refreshToursOnce(force); }
+  catch (error) { MAWAYID_reportError(error); throw error; }
+}
+function MAWAYID_reportError(error) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var url = String(props.getProperty('MAWAYID_APP_URL') || '').replace(/\/$/,''), secret = props.getProperty('MAWAYID_SYNC_TOKEN') || '';
+    if (!/^https:\/\/[^/?#]+$/.test(url) || secret.length < 32) return;
+    UrlFetchApp.fetch(url+'/api/sync/error', { method:'post', contentType:'application/json', headers:{Authorization:'Bearer '+secret},
+      payload:JSON.stringify({message:String(error && error.message || error).slice(0,500)}), muteHttpExceptions:true });
+  } catch (ignored) {}
+}
+function MAWAYID_refreshToursOnce(force) {
   var props = PropertiesService.getScriptProperties();
   var url = String(props.getProperty('MAWAYID_APP_URL') || '').replace(/\/$/,'');
   var secret = props.getProperty('MAWAYID_SYNC_TOKEN') || '';
@@ -128,7 +143,7 @@ function MAWAYID_buildTours(data, config, firstRow) {
       var invalid = !office || !Number.isInteger(pax)||pax<1||pax>10000 ? id+': source row '+(offset+index+1)+' has '+(!office?'no office':'no valid PAX')+'; excluded until it is fixed.' : null;
       if(!groups[id])groups[id]={arrivals:[],departures:[]};
       var events=groups[id][pair[1]], prior=events.filter(function(v){return v.date===date;})[0];
-      if(prior && (prior.pax!==pax || prior.office!==office))prior.issue='Conflicting duplicate '+id+' on '+date+' (rows '+prior.row+' and '+(offset+index+1)+'). Tours was not updated.';
+      if(prior && (prior.pax!==pax || prior.office!==office))prior.issue=id+': conflicting duplicate rows on '+date+' (rows '+prior.row+' and '+(offset+index+1)+'); excluded until it is fixed.';
       if(!prior)events.push({date:date,office:office,pax:pax,row:offset+index+1,issue:null,invalid:invalid});
     });
   });
@@ -143,17 +158,17 @@ function MAWAYID_buildTours(data, config, firstRow) {
       // Keep arrivals before the cutoff when Wada + 1 is on/after it.
       var relevant = arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;});
       if(!relevant)return;
-      if(arrival.issue)throw new Error(arrival.issue);
-      departures.forEach(function(d){if(d.issue)throw new Error(d.issue);});
-      var invalid=[arrival].concat(departures).filter(function(e){return e.invalid;})[0];
-      if(invalid){warnings.push(invalid.invalid);return;}
+      // A conflicting duplicate or an invalid row leaves out only its own tour, with a warning; the app keeps that tour's
+      // last synced stay (and its printed cards) until the row is fixed. A duplicate used to stop the whole sync.
+      var issue=[arrival].concat(departures).filter(function(e){return e.issue||e.invalid;})[0];
+      if(issue){warnings.push(issue.issue||issue.invalid);return;}
       if(departures.length!==1){if(arrival.date>=config.cutoff || departures.some(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff;}))warnings.push(id+' ('+arrival.date+'): needs exactly one Wada date before the next arrival; excluded.');return;}
       var departure=departures[0];if(MAWAYID_nextDay(departure.date)<config.cutoff)return;
       if(next && MAWAYID_nextDay(departure.date)>=next.date){warnings.push(id+': departure (Wada + 1 day) overlaps the next arrival; excluded.');return;}
       if(departure.pax!==arrival.pax){warnings.push(id+': arrival and Wada PAX differ; excluded.');return;}
       tours.push({tour_id:id,office:arrival.office,arrival:arrival.date,departure:MAWAYID_nextDay(departure.date),pax:arrival.pax});
     });
-    g.departures.filter(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){if(d.issue)throw new Error(d.issue);warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
+    g.departures.filter(function(d){return MAWAYID_nextDay(d.date)>=config.cutoff && !g.arrivals.some(function(a){return a.date<=d.date;});}).forEach(function(d){if(d.issue){warnings.push(d.issue);return;}warnings.push(id+' ('+d.date+'): no arrival found; excluded.');});
   });
   tours.sort(function(a,b){return a.arrival.localeCompare(b.arrival)||a.tour_id.localeCompare(b.tour_id);});
   return {tours:tours,warnings:warnings};

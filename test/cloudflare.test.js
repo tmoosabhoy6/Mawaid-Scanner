@@ -611,3 +611,37 @@ test('Cloudflare: without NKERP secrets the job does nothing and Sheet arrivals 
  assert.equal((await f.call('/settings')).data.nkerp.configured,false);
  }finally{await f.close();}
 });
+
+// Guests turned away live (20–23 November 2026) although their tour was in Karbala; see test/false-red.test.js.
+test('Cloudflare: a guest is let in while NKERP or another stay of the tour puts it in Karbala; mistyped numbers are found',async()=>{
+ const f=await fixture();try{
+ const december=await f.tour(3,{tour_id:'26/3449',arrival:'2026-12-17',departure:'2026-12-22'});await f.issue(december.id);
+ const typed=number=>f.call('/scan',{number,requestKey:randomUUID()},'scanner');
+ f.setTime('2026-10-22T10:00:00Z');
+ assert.equal((await typed('013449')).data.reason,'before_arrival');
+ await f.db.prepare("INSERT INTO settings(key,value) VALUES('nkerp',?)").bind(JSON.stringify({visits:[['26/3449','2026-10-20T15:10','2026-10-24']]})).run();
+ assert.deepEqual([(await typed('013449')).data.status,(await typed('023449')).data.reason],['green','admitted']);
+ // The leading zero left off: 23500 for card 023500, of a stay covering the day.
+ const current=await f.tour(2,{tour_id:'26/3500'});await f.issue(current.id);
+ const r=await typed('23500');assert.deepEqual([r.data.status,r.data.reason,r.data.typed_code],['green','admitted','23500']);
+ assert.equal((await typed('023500')).data.reason,'already_scanned');
+ await f.db.prepare('UPDATE tours SET active=0 WHERE id=?').bind(december.id).run();
+ assert.equal((await typed('033449')).data.reason,'admitted');
+ f.setTime('2026-10-25T10:00:00Z');
+ assert.equal((await typed('013449')).data.reason,'inactive_tour');
+ // Another active stay under the same tour ID covering the day lets the December card in too.
+ await f.db.prepare('UPDATE tours SET active=1 WHERE id=?').bind(december.id).run();
+ await f.call('/tours',{tour_id:'26/3449',office:'',arrival:'2026-10-25',departure:'2026-10-27',pax:1});
+ assert.equal((await typed('023449')).data.reason,'admitted');
+ const stay=(await f.call('/scanner/data',undefined,'scanner')).data.tours.find(t=>t[0]===december.id);
+ assert.deepEqual(stay[5],[['2026-10-25','2026-10-27'],['2026-12-17','2026-12-22']]);
+ }finally{await f.close();}
+});
+
+test('Cloudflare: the Apps Script reports a sync it could not finish, and Settings shows it',async()=>{
+ const f=await fixture();try{
+ assert.equal((await f.call('/sync/error',{message:'x'},'none',{headers:{Authorization:'Bearer wrong'}})).status,401);
+ assert.equal((await f.call('/sync/error',{message:'Source columns do not match the arrival/departure headers'},'none',{headers:{Authorization:`Bearer ${config.SYNC_TOKEN}`}})).status,200);
+ assert.match((await f.call('/settings')).data.syncError.message,/^Google Sheet: Source columns do not match/);
+ }finally{await f.close();}
+});
